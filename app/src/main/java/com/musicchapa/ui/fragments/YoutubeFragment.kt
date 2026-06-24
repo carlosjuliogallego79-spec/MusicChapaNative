@@ -1,8 +1,6 @@
 package com.musicchapa.ui.fragments
 
-import android.Manifest
 import android.content.ContentValues
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -11,7 +9,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
-import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.musicchapa.R
@@ -19,20 +16,12 @@ import com.musicchapa.ui.adapters.YoutubeResultAdapter
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 class YoutubeFragment : Fragment() {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
     private val results = mutableListOf<YoutubeResult>()
 
     data class YoutubeResult(val title: String, val videoId: String, val author: String, val duration: Long)
@@ -61,56 +50,42 @@ class YoutubeFragment : Fragment() {
             try {
                 results.clear()
                 adapter.notifyDataSetChanged()
+                Toast.makeText(context, "Buscando...", Toast.LENGTH_SHORT).show()
 
-                val instances = listOf(
-                    "https://pipedapi.kavin.rocks/search?q=${java.net.URLEncoder.encode(query, "UTF-8")}",
-                    "https://inv.nadeko.net/api/v1/search?q=${java.net.URLEncoder.encode(query, "UTF-8")}"
-                )
-                var jsonStr: String? = null
-                for (apiUrl in instances) {
+                val searchUrl = "ytsearch10:$query"
+                val request = YoutubeDLRequest(searchUrl)
+                request.addOption("--no-playlist")
+                request.addOption("--no-warnings")
+                request.addOption("--no-check-certificate")
+                request.addOption("--user-agent", "Mozilla/5.0")
+                request.addOption("--skip-download")
+                request.addOption("--print-json")
+                request.addOption("--flat-playlist")
+
+                val response = withContext(Dispatchers.IO) {
+                    YoutubeDL.getInstance().execute(request)
+                }
+
+                val lines = response.out.trim().split("\n")
+                for (line in lines) {
                     try {
-                        val request = Request.Builder().url(apiUrl)
-                            .header("User-Agent", "Mozilla/5.0")
-                            .build()
-                        jsonStr = withContext(Dispatchers.IO) {
-                            client.newCall(request).execute().body?.string()
+                        val json = JSONObject(line.trim())
+                        val id = json.optString("id", "")
+                        val title = json.optString("title", "Unknown")
+                        val author = json.optString("channel", json.optString("uploader", ""))
+                        val duration = json.optLong("duration", 0)
+                        if (id.isNotEmpty()) {
+                            results.add(YoutubeResult(title, id, author, duration))
                         }
-                        if (jsonStr != null) break
                     } catch (_: Exception) { continue }
                 }
-
-                if (jsonStr == null) return@launch
-
-                val items = try { JSONArray(jsonStr) } catch (_: Exception) { null }
-                if (items != null) {
-                    for (i in 0 until items.length()) {
-                        val item = items.getJSONObject(i)
-                        if (item.optString("type", "") == "video") {
-                            results.add(YoutubeResult(
-                                title = item.optString("title", "Unknown"),
-                                videoId = item.optString("videoId", ""),
-                                author = item.optString("uploaderName", item.optString("author", "")),
-                                duration = item.optLong("duration", 0)
-                            ))
-                        }
-                    }
-                } else {
-                    val obj = JSONObject(jsonStr)
-                    val arr = obj.optJSONArray("items") ?: obj.optJSONArray("videos")
-                    if (arr != null) {
-                        for (i in 0 until arr.length()) {
-                            val item = arr.getJSONObject(i)
-                            results.add(YoutubeResult(
-                                title = item.optString("title", "Unknown"),
-                                videoId = item.optString("videoId", ""),
-                                author = item.optString("uploaderName", item.optString("author", "")),
-                                duration = item.optLong("duration", item.optLong("lengthSeconds", 0))
-                            ))
-                        }
-                    }
-                }
                 adapter.notifyDataSetChanged()
-            } catch (_: Exception) {}
+                if (results.isEmpty()) {
+                    Toast.makeText(context, "Sin resultados", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error búsqueda: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -118,61 +93,71 @@ class YoutubeFragment : Fragment() {
         scope.launch {
             val ctx = requireContext()
             val url = "https://www.youtube.com/watch?v=$videoId"
-            val dir = File(ctx.getExternalFilesDir(null), "ytdlp")
+            val dir = File(ctx.cacheDir, "ytdlp")
             dir.mkdirs()
 
             try {
+                Toast.makeText(ctx, "Descargando MP3...", Toast.LENGTH_SHORT).show()
+
                 val request = YoutubeDLRequest(url)
                 request.addOption("--no-playlist")
                 request.addOption("--no-warnings")
+                request.addOption("--no-check-certificate")
+                request.addOption("--user-agent", "Mozilla/5.0")
                 request.addOption("--extract-audio")
                 request.addOption("--audio-format", "mp3")
                 request.addOption("--audio-quality", "0")
                 request.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
+                request.addOption("-f", "bestaudio/best")
 
                 withContext(Dispatchers.IO) {
                     YoutubeDL.getInstance().execute(request)
                 }
 
-                val downloadedFile = dir.listFiles()?.maxByOrNull { it.lastModified() }
-                if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0) {
-                    moveToDownloads(downloadedFile)
-                    Toast.makeText(ctx, "Completa: ${downloadedFile.name}", Toast.LENGTH_SHORT).show()
+                val files = dir.listFiles()
+                val mp3 = files?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
+                if (mp3 == null || !mp3.exists() || mp3.length() == 0L) {
+                    Toast.makeText(ctx, "Error: no se generó el MP3", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val safeName = mp3.nameWithoutExtension.replace(Regex("""[\\/:*?"<>|]"""), "_").take(50)
+                val fileName = "${safeName}_${videoId.take(8)}.mp3"
+
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                        put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
+                        put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                        put(MediaStore.Downloads.SIZE, mp3.length())
+                    }
+                    val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) {
+                        val output = ctx.contentResolver.openOutputStream(uri)
+                        if (output != null) {
+                            mp3.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
+                            values.clear()
+                            values.put(MediaStore.Downloads.IS_PENDING, 0)
+                            ctx.contentResolver.update(uri, values, null, null)
+                            mp3.delete()
+                            Toast.makeText(ctx, "Completa: $fileName", Toast.LENGTH_SHORT).show()
+                            return@launch
+                        }
+                    }
+                    mp3.delete()
+                    Toast.makeText(ctx, "Error al guardar", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(ctx, "Error: archivo no encontrado", Toast.LENGTH_SHORT).show()
+                    val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
+                    publicDir.mkdirs()
+                    mp3.copyTo(File(publicDir, fileName), overwrite = true)
+                    mp3.delete()
+                    Toast.makeText(ctx, "Completa: $fileName", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                Toast.makeText(ctx, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "Error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
-    }
-
-    private fun moveToDownloads(file: File) {
-        val ctx = requireContext()
-        if (Build.VERSION.SDK_INT >= 29) {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, file.name)
-                put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
-                put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-                put(MediaStore.Downloads.SIZE, file.length())
-            }
-            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            if (uri != null) {
-                val output = ctx.contentResolver.openOutputStream(uri)
-                if (output != null) {
-                    file.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
-                    values.clear()
-                    values.put(MediaStore.Downloads.IS_PENDING, 0)
-                    ctx.contentResolver.update(uri, values, null, null)
-                }
-            }
-        } else {
-            val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
-            publicDir.mkdirs()
-            file.copyTo(File(publicDir, file.name), overwrite = true)
-        }
-        file.delete()
     }
 
     override fun onDestroy() {

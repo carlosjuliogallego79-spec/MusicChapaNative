@@ -1,8 +1,6 @@
 package com.musicchapa.ui.fragments
 
-import android.Manifest
 import android.content.ContentValues
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -11,25 +9,22 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
-import androidx.core.content.ContextCompat
+import android.widget.Toast
 import androidx.fragment.app.Fragment
 import com.musicchapa.R
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 class UrlDownloadFragment : Fragment() {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var currentVideoId: String? = null
     private var currentFormats = mutableListOf<AudioFormat>()
-    private var currentTitle = ""
+    private var currentUrl = ""
 
-    data class AudioFormat(val formatId: String, val label: String, val ext: String, val bitrate: Int)
+    data class AudioFormat(val formatId: String, val label: String)
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_url_download, container, false)
@@ -42,35 +37,21 @@ class UrlDownloadFragment : Fragment() {
             val url = urlInput.text.toString().trim()
             if (url.isEmpty()) return@setOnClickListener
             urlInput.text.clear()
-            val videoId = extractYoutubeId(url)
-            if (videoId != null) {
-                statusText.text = "Obteniendo info..."
-                scope.launch { fetchFormats(url, statusText, formatSpinner) }
-            } else {
-                statusText.text = "Descargando..."
-                scope.launch { downloadWithYtDlp(url, "audio", statusText) }
-            }
+            currentUrl = url
+            statusText.text = "Analizando enlace..."
+            scope.launch { analyzeUrl(url, statusText, formatSpinner) }
         }
         return view
     }
 
-    private fun extractYoutubeId(url: String): String? {
-        val patterns = listOf(
-            Regex("""(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})"""),
-            Regex("""^([a-zA-Z0-9_-]{11})$""")
-        )
-        for (p in patterns) {
-            p.find(url)?.let { return it.groupValues[1] }
-        }
-        return null
-    }
-
-    private suspend fun fetchFormats(url: String, statusText: android.widget.TextView, spinner: android.widget.Spinner) {
+    private suspend fun analyzeUrl(url: String, statusText: android.widget.TextView, spinner: android.widget.Spinner) {
         currentFormats.clear()
         try {
             val request = YoutubeDLRequest(url)
             request.addOption("--no-playlist")
             request.addOption("--no-warnings")
+            request.addOption("--no-check-certificate")
+            request.addOption("--user-agent", "Mozilla/5.0")
             request.addOption("--skip-download")
             request.addOption("--print-json")
 
@@ -79,39 +60,16 @@ class UrlDownloadFragment : Fragment() {
             }
 
             val json = JSONObject(response.out)
-            currentTitle = json.optString("title", "Video")
-            currentVideoId = json.optString("id", "")
+            val title = json.optString("title", "Video")
 
-            val formats = json.optJSONArray("formats") ?: JSONArray()
-            val seen = mutableSetOf<String>()
+            // Always offer MP3 format
+            currentFormats.add(AudioFormat("bestaudio/best", "MP3 192kbps (recomendado)"))
+            currentFormats.add(AudioFormat("bestaudio", "MP3 mejor calidad"))
 
-            for (i in 0 until formats.length()) {
-                val f = formats.getJSONObject(i)
-                val vcodec = f.optString("vcodec", "none")
-                val acodec = f.optString("acodec", "none")
-
-                if (vcodec == "none" && acodec != "none") {
-                    val formatId = f.optString("format_id", "")
-                    val abr = f.optInt("abr", f.optInt("tbr", 0))
-                    val ext = f.optString("ext", "m4a")
-                    val label = "${ext.uppercase()} ${abr}kbps"
-                    if (formatId !in seen) {
-                        seen.add(formatId)
-                        currentFormats.add(AudioFormat(formatId, label, ext, abr))
-                    }
-                }
-            }
-
-            if (currentFormats.isEmpty()) {
-                currentFormats.add(AudioFormat("bestaudio/best", "MP3 192kbps (recomendado)", "mp3", 0))
-            }
-
-            currentFormats.sortByDescending { it.bitrate }
-            val labels = currentFormats.map { "${it.label} - $currentTitle" }
-
+            val labels = currentFormats.map { "${it.label} - ${title.take(50)}" }
             spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_dropdown_item, labels)
             spinner.visibility = View.VISIBLE
-            statusText.text = "Seleccioná formato para descargar MP3"
+            statusText.text = "Seleccioná formato para descargar"
 
             spinner.onItemSelectedListener = null
             spinner.setSelection(0)
@@ -120,7 +78,8 @@ class UrlDownloadFragment : Fragment() {
                     val fmt = currentFormats[pos]
                     statusText.text = "Descargando ${fmt.label}..."
                     scope.launch {
-                        downloadWithYtDlp(url, fmt.formatId, statusText)
+                        val result = downloadMp3(url, fmt.formatId, title, statusText)
+                        statusText.text = result ?: "Completa ✓"
                         spinner.visibility = View.GONE
                     }
                 }
@@ -131,67 +90,66 @@ class UrlDownloadFragment : Fragment() {
         }
     }
 
-    private suspend fun downloadWithYtDlp(url: String, formatId: String, statusText: android.widget.TextView) {
+    private suspend fun downloadMp3(url: String, formatId: String, title: String, statusText: android.widget.TextView): String? = withContext(Dispatchers.IO) {
         try {
             val ctx = requireContext()
-            val dir = File(ctx.getExternalFilesDir(null), "ytdlp")
+            val dir = File(ctx.cacheDir, "ytdlp")
             dir.mkdirs()
 
             val request = YoutubeDLRequest(url)
             request.addOption("--no-playlist")
             request.addOption("--no-warnings")
+            request.addOption("--no-check-certificate")
+            request.addOption("--user-agent", "Mozilla/5.0")
             request.addOption("--extract-audio")
             request.addOption("--audio-format", "mp3")
             request.addOption("--audio-quality", "0")
             request.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
-            if (formatId != "bestaudio/best") {
-                request.addOption("-f", "$formatId+bestaudio/best")
+            request.addOption("-f", formatId)
+
+            YoutubeDL.getInstance().execute(request)
+
+            val files = dir.listFiles()
+            val mp3 = files?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
+            if (mp3 == null || !mp3.exists() || mp3.length() == 0L) {
+                return@withContext "Error: archivo MP3 no generado"
             }
 
-            withContext(Dispatchers.IO) {
-                YoutubeDL.getInstance().execute(request)
-            }
+            val safeName = title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(50)
+            val fileName = "${safeName}_${System.currentTimeMillis()}.mp3"
 
-            // Find the downloaded file
-            val downloadedFile = dir.listFiles()
-                ?.maxByOrNull { it.lastModified() }
-            if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0) {
-                moveToDownloads(downloadedFile)
-                statusText.text = "Completa: ${downloadedFile.name}"
+            if (Build.VERSION.SDK_INT >= 29) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
+                    put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                    put(MediaStore.Downloads.SIZE, mp3.length())
+                }
+                val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    val output = ctx.contentResolver.openOutputStream(uri)
+                    if (output != null) {
+                        mp3.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
+                        values.clear()
+                        values.put(MediaStore.Downloads.IS_PENDING, 0)
+                        ctx.contentResolver.update(uri, values, null, null)
+                        mp3.delete()
+                        return@withContext null
+                    }
+                }
+                mp3.delete()
+                return@withContext "Error: no se pudo guardar en descargas"
             } else {
-                statusText.text = "Error: archivo no encontrado"
+                val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
+                publicDir.mkdirs()
+                mp3.copyTo(File(publicDir, fileName), overwrite = true)
+                mp3.delete()
+                return@withContext null
             }
         } catch (e: Exception) {
-            statusText.text = "Error: ${e.message}"
+            return@withContext "Error: ${e.message}"
         }
-    }
-
-    private fun moveToDownloads(file: File) {
-        val ctx = requireContext()
-        if (Build.VERSION.SDK_INT >= 29) {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, file.name)
-                put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
-                put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-                put(MediaStore.Downloads.SIZE, file.length())
-            }
-            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            if (uri != null) {
-                val output = ctx.contentResolver.openOutputStream(uri)
-                if (output != null) {
-                    file.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
-                    values.clear()
-                    values.put(MediaStore.Downloads.IS_PENDING, 0)
-                    ctx.contentResolver.update(uri, values, null, null)
-                }
-            }
-        } else {
-            val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
-            publicDir.mkdirs()
-            file.copyTo(File(publicDir, file.name), overwrite = true)
-        }
-        file.delete()
     }
 
     override fun onDestroy() {
