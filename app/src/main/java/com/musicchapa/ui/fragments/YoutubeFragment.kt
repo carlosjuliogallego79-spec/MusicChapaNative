@@ -8,15 +8,15 @@ import android.provider.MediaStore
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.musicchapa.R
 import com.musicchapa.ui.adapters.YoutubeResultAdapter
 import kotlinx.coroutines.*
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -29,8 +29,7 @@ class YoutubeFragment : Fragment() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .followRedirects(true)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
     private val results = mutableListOf<YoutubeResult>()
 
@@ -115,118 +114,96 @@ class YoutubeFragment : Fragment() {
 
     private fun downloadAudio(videoId: String) {
         scope.launch {
-            val audioUrl = getYoutubeAudioUrl(videoId)
-            if (audioUrl != null) {
-                saveAudio(audioUrl, videoId)
+            val instances = listOf(
+                "https://inv.nadeko.net/api/v1/videos/$videoId",
+                "https://invidious.snopyta.org/api/v1/videos/$videoId"
+            )
+            var videoTitle = ""
+            var bestItag = 140
+            for (instance in instances) {
+                try {
+                    val request = Request.Builder().url(instance)
+                        .header("User-Agent", "Mozilla/5.0")
+                        .build()
+                    val jsonStr = withContext(Dispatchers.IO) { client.newCall(request).execute().body?.string() } ?: continue
+                    val json = JSONObject(jsonStr)
+                    videoTitle = json.optString("title", "Audio")
+                    val formats = json.optJSONArray("adaptiveFormats") ?: continue
+                    var bestBitrate = 0
+                    for (i in 0 until formats.length()) {
+                        val f = formats.getJSONObject(i)
+                        if (f.optString("type", "").startsWith("audio")) {
+                            val bitrate = f.optInt("bitrate", 0)
+                            if (bitrate > bestBitrate) {
+                                bestBitrate = bitrate
+                                bestItag = f.optInt("itag", 140)
+                            }
+                        }
+                    }
+                    break
+                } catch (_: Exception) { continue }
             }
+            saveAudio(videoId, bestItag, videoTitle)
         }
     }
 
-    private suspend fun getYoutubeAudioUrl(videoId: String): String? = withContext(Dispatchers.IO) {
-        try {
-            val bodyJson = JSONObject().apply {
-                put("videoId", videoId)
-                put("context", JSONObject().apply {
-                    put("client", JSONObject().apply {
-                        put("clientName", "ANDROID")
-                        put("clientVersion", "19.09.37")
-                        put("androidSdkVersion", 30)
-                    })
-                })
-            }
-            val request = Request.Builder()
-                .url("https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")
-                .header("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip")
-                .header("Content-Type", "application/json")
-                .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-            val jsonStr = client.newCall(request).execute().body?.string() ?: return@withContext null
-            val json = JSONObject(jsonStr)
+    private suspend fun saveAudio(videoId: String, itag: Int, title: String) = withContext(Dispatchers.IO) {
+        val instances = listOf(
+            "https://inv.nadeko.net/latest_version?id=$videoId&itag=$itag",
+            "https://invidious.snopyta.org/latest_version?id=$videoId&itag=$itag"
+        )
+        val ext = if (itag == 140) "m4a" else "opus"
+        for (dlUrl in instances) {
+            try {
+                val url = URL(dlUrl)
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
+                conn.setRequestProperty("Referer", "https://www.youtube.com/")
+                conn.instanceFollowRedirects = true
+                conn.connect()
+                if (conn.responseCode != 200) { conn.disconnect(); continue }
+                val length = conn.contentLengthLong
+                if (length == 0L) { conn.disconnect(); continue }
 
-            val streamingData = json.optJSONObject("streamingData") ?: return@withContext null
-            val formats = streamingData.optJSONArray("adaptiveFormats") ?: return@withContext null
+                val safeName = title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(50)
+                val fileName = "${safeName}_${videoId.take(8)}.$ext"
 
-            var bestUrl: String? = null
-            var bestBitrate = -1
-            for (i in 0 until formats.length()) {
-                val f = formats.getJSONObject(i)
-                val mime = f.optString("mimeType", "")
-                if (mime.startsWith("audio")) {
-                    val bitrate = f.optInt("bitrate", 0)
-                    if (bitrate > bestBitrate) {
-                        bestBitrate = bitrate
-                        bestUrl = f.optString("url")
-                        if (bestUrl == null) {
-                            val cipher = f.optString("cipher", f.optString("signatureCipher", ""))
-                            if (cipher.isNotEmpty()) {
-                                val params = cipher.split("&").associate {
-                                    val parts = it.split("=", limit = 2)
-                                    parts[0] to (parts.getOrNull(1) ?: "")
-                                }
-                                val sp = params["sp"] ?: "signature"
-                                val sig = params[sp] ?: params["s"] ?: continue
-                                bestUrl = params["url"] ?: continue
-                                bestUrl = "$bestUrl&$sp=$sig"
-                            }
+                var success = false
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                        put(MediaStore.Downloads.MIME_TYPE, if (ext == "m4a") "audio/mp4" else "audio/opus")
+                        put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                        if (length > 0) put(MediaStore.Downloads.SIZE, length)
+                    }
+                    val uri = requireContext().contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) {
+                        val output = requireContext().contentResolver.openOutputStream(uri)
+                        if (output != null) {
+                            val total = conn.inputStream.use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
+                            values.clear()
+                            values.put(MediaStore.Downloads.IS_PENDING, 0)
+                            if (total > 0) { values.put(MediaStore.Downloads.SIZE, total); success = true }
+                            requireContext().contentResolver.update(uri, values, null, null)
                         }
                     }
+                } else {
+                    val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
+                    dir.mkdirs()
+                    val file = File(dir, fileName)
+                    conn.inputStream.use { input -> FileOutputStream(file).use { out -> input.copyTo(out, bufferSize = 65536) } }
+                    success = file.exists() && file.length() > 0
                 }
-            }
-            return@withContext bestUrl
-        } catch (_: Exception) { return@withContext null }
-    }
-
-    private suspend fun saveAudio(audioUrl: String, videoId: String) = withContext(Dispatchers.IO) {
-        try {
-            val urlObj = URL(audioUrl)
-            val conn = urlObj.openConnection() as java.net.HttpURLConnection
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
-            conn.setRequestProperty("Referer", "https://www.youtube.com/")
-            conn.instanceFollowRedirects = true
-            conn.connect()
-
-            val code = conn.responseCode
-            if (code != 200) { conn.disconnect(); return@withContext }
-            val length = conn.contentLengthLong
-            if (length == 0L) { conn.disconnect(); return@withContext }
-
-            if (Build.VERSION.SDK_INT >= 29) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, "${videoId}_${System.currentTimeMillis()}.m4a")
-                    put(MediaStore.Downloads.MIME_TYPE, "audio/mp4")
-                    put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
-                    put(MediaStore.Downloads.IS_PENDING, 1)
-                    if (length > 0) put(MediaStore.Downloads.SIZE, length)
-                }
-                val uri = requireContext().contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    val output = requireContext().contentResolver.openOutputStream(uri)
-                    if (output != null) {
-                        conn.inputStream.use { input ->
-                            output.use { out ->
-                                input.copyTo(out, bufferSize = 65536)
-                            }
-                        }
+                conn.disconnect()
+                if (success) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Descarga completa: $fileName", Toast.LENGTH_SHORT).show()
                     }
-                    values.clear()
-                    values.put(MediaStore.Downloads.IS_PENDING, 0)
-                    requireContext().contentResolver.update(uri, values, null, null)
+                    return@withContext
                 }
-            } else {
-                val dir = File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                    "MusicChapa"
-                )
-                dir.mkdirs()
-                val file = File(dir, "${videoId}_${System.currentTimeMillis()}.m4a")
-                conn.inputStream.use { input ->
-                    FileOutputStream(file).use { out ->
-                        input.copyTo(out, bufferSize = 65536)
-                    }
-                }
-            }
-            conn.disconnect()
-        } catch (_: Exception) {}
+            } catch (_: Exception) { continue }
+        }
     }
 
     override fun onDestroy() {
