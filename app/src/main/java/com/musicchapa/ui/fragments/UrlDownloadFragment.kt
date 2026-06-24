@@ -176,7 +176,8 @@ class UrlDownloadFragment : Fragment() {
                     continue
                 }
 
-                val body = response.body ?: run { response.close(); continue }
+                val body = response.body
+                if (body == null) { response.close(); continue }
                 val length = body.contentLength()
 
                 if (length == 0L) {

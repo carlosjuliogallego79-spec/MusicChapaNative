@@ -152,7 +152,8 @@ class YoutubeFragment : Fragment() {
                         .build()
                     val response = withContext(Dispatchers.IO) { client.newCall(req).execute() }
                     if (!response.isSuccessful) { response.close(); continue }
-                    val body = response.body ?: run { response.close(); continue }
+                    val body = response.body
+                    if (body == null) { response.close(); continue }
                     if (body.contentLength() == 0L) { response.close(); continue }
 
                     val safeName = title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(50)
