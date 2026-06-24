@@ -13,8 +13,10 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.musicchapa.R
 import com.musicchapa.ui.adapters.YoutubeResultAdapter
 import kotlinx.coroutines.*
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -27,7 +29,8 @@ class YoutubeFragment : Fragment() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .followRedirects(true)
         .build()
     private val results = mutableListOf<YoutubeResult>()
 
@@ -112,68 +115,96 @@ class YoutubeFragment : Fragment() {
 
     private fun downloadAudio(videoId: String) {
         scope.launch {
-            val audioUrl = getAudioUrl(videoId)
+            val audioUrl = getYoutubeAudioUrl(videoId)
             if (audioUrl != null) {
                 saveAudio(audioUrl, videoId)
             }
         }
     }
 
-    private suspend fun getAudioUrl(videoId: String): String? = withContext(Dispatchers.IO) {
-        val instances = listOf(
-            "https://pipedapi.kavin.rocks/streams/$videoId",
-            "https://inv.nadeko.net/api/v1/videos/$videoId"
-        )
-        for (apiUrl in instances) {
-            try {
-                val request = Request.Builder().url(apiUrl)
-                    .header("User-Agent", "Mozilla/5.0")
-                    .build()
-                val jsonStr = client.newCall(request).execute().body?.string() ?: continue
-                val json = JSONObject(jsonStr)
-                if (apiUrl.contains("pipedapi")) {
-                    val streams = json.optJSONArray("audioStreams")
-                    if (streams != null) {
-                        for (i in 0 until streams.length()) {
-                            val s = streams.getJSONObject(i)
-                            return@withContext s.optString("url")
-                        }
-                    }
-                    json.optString("audioStreamUrl").takeIf { it.isNotEmpty() }?.let { return@withContext it }
-                } else {
-                    val formats = json.optJSONArray("adaptiveFormats")
-                    if (formats != null) {
-                        for (i in 0 until formats.length()) {
-                            val f = formats.getJSONObject(i)
-                            if (f.optString("type", "").startsWith("audio")) {
-                                return@withContext f.optString("url")
+    private suspend fun getYoutubeAudioUrl(videoId: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val bodyJson = JSONObject().apply {
+                put("videoId", videoId)
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "ANDROID")
+                        put("clientVersion", "19.09.37")
+                        put("androidSdkVersion", 30)
+                    })
+                })
+            }
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")
+                .header("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip")
+                .header("Content-Type", "application/json")
+                .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            val jsonStr = client.newCall(request).execute().body?.string() ?: return@withContext null
+            val json = JSONObject(jsonStr)
+
+            val streamingData = json.optJSONObject("streamingData") ?: return@withContext null
+            val formats = streamingData.optJSONArray("adaptiveFormats") ?: return@withContext null
+
+            var bestUrl: String? = null
+            var bestBitrate = -1
+            for (i in 0 until formats.length()) {
+                val f = formats.getJSONObject(i)
+                val mime = f.optString("mimeType", "")
+                if (mime.startsWith("audio")) {
+                    val bitrate = f.optInt("bitrate", 0)
+                    if (bitrate > bestBitrate) {
+                        bestBitrate = bitrate
+                        bestUrl = f.optString("url")
+                        if (bestUrl == null) {
+                            val cipher = f.optString("cipher", f.optString("signatureCipher", ""))
+                            if (cipher.isNotEmpty()) {
+                                val params = cipher.split("&").associate {
+                                    val parts = it.split("=", limit = 2)
+                                    parts[0] to (parts.getOrNull(1) ?: "")
+                                }
+                                val sp = params["sp"] ?: "signature"
+                                val sig = params[sp] ?: params["s"] ?: continue
+                                bestUrl = params["url"] ?: continue
+                                bestUrl = "$bestUrl&$sp=$sig"
                             }
                         }
                     }
                 }
-            } catch (_: Exception) { continue }
-        }
-        null
+            }
+            return@withContext bestUrl
+        } catch (_: Exception) { return@withContext null }
     }
 
     private suspend fun saveAudio(audioUrl: String, videoId: String) = withContext(Dispatchers.IO) {
         try {
+            val urlObj = URL(audioUrl)
+            val conn = urlObj.openConnection() as java.net.HttpURLConnection
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
+            conn.setRequestProperty("Referer", "https://www.youtube.com/")
+            conn.instanceFollowRedirects = true
+            conn.connect()
+
+            val code = conn.responseCode
+            if (code != 200) { conn.disconnect(); return@withContext }
+            val length = conn.contentLengthLong
+            if (length == 0L) { conn.disconnect(); return@withContext }
+
             if (Build.VERSION.SDK_INT >= 29) {
                 val values = ContentValues().apply {
                     put(MediaStore.Downloads.DISPLAY_NAME, "${videoId}_${System.currentTimeMillis()}.m4a")
                     put(MediaStore.Downloads.MIME_TYPE, "audio/mp4")
                     put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
                     put(MediaStore.Downloads.IS_PENDING, 1)
+                    if (length > 0) put(MediaStore.Downloads.SIZE, length)
                 }
                 val uri = requireContext().contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 if (uri != null) {
                     val output = requireContext().contentResolver.openOutputStream(uri)
                     if (output != null) {
-                        val connection = URL(audioUrl).openConnection()
-                        connection.setRequestProperty("User-Agent", "Mozilla/5.0")
-                        connection.getInputStream().use { input ->
+                        conn.inputStream.use { input ->
                             output.use { out ->
-                                input.copyTo(out, bufferSize = 8192)
+                                input.copyTo(out, bufferSize = 65536)
                             }
                         }
                     }
@@ -188,14 +219,13 @@ class YoutubeFragment : Fragment() {
                 )
                 dir.mkdirs()
                 val file = File(dir, "${videoId}_${System.currentTimeMillis()}.m4a")
-                val connection = URL(audioUrl).openConnection()
-                connection.setRequestProperty("User-Agent", "Mozilla/5.0")
-                connection.getInputStream().use { input ->
+                conn.inputStream.use { input ->
                     FileOutputStream(file).use { out ->
-                        input.copyTo(out, bufferSize = 8192)
+                        input.copyTo(out, bufferSize = 65536)
                     }
                 }
             }
+            conn.disconnect()
         } catch (_: Exception) {}
     }
 
