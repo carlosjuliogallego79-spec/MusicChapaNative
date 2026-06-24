@@ -2,9 +2,13 @@
 <resources>
     <style name="Theme.MusicChapa" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">@color/purple_primary</item>
-        <item name="colorPrimaryVariant">@color/purple_dark</item>
         <item name="colorOnPrimary">@color/white</item>
-        <item name="colorSecondary">@color/purple_light</item>
+        <item name="colorPrimaryContainer">@color/purple_light</item>
+        <item name="colorOnPrimaryContainer">#FF1D192B</item>
+        <item name="colorSecondary">#FF6750A4</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">#FF1D192B</item>
         <item name="android:windowBackground">@color/background</item>
     </style>
 </resources>

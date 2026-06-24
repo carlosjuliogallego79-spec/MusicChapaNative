@@ -3,7 +3,16 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="16dp"
+    android:background="?attr/colorSurface">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/url_download"
+        android:textAppearance="?attr/textAppearanceHeadlineSmall"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginBottom="12dp" />
 
     <EditText
         android:id="@+id/url_input"
@@ -12,14 +21,17 @@
         android:hint="@string/url_hint"
         android:inputType="textUri"
         android:padding="12dp"
-        android:background="@drawable/rounded_input" />
+        android:background="@drawable/rounded_input"
+        android:textColor="?attr/colorOnSurface"
+        android:textColorHint="?attr/colorOnSurfaceVariant" />
 
     <Button
         android:id="@+id/download_btn"
         android:layout_width="match_parent"
         android:layout_height="48dp"
         android:layout_marginTop="16dp"
-        android:text="@string/download" />
+        android:text="@string/download"
+        style="?attr/materialButtonStyle" />
 
     <Spinner
         android:id="@+id/format_spinner"
@@ -33,6 +45,6 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:textColor="@color/gray" />
+        android:textColor="?attr/colorOnSurfaceVariant" />
 
 </LinearLayout>

@@ -6,5 +6,8 @@
     <color name="white">#FFFFFFFF</color>
     <color name="black">#FF000000</color>
     <color name="gray">#FF9E9E9E</color>
-    <color name="background">#FFF5F5F5</color>
+    <color name="background">#FFFDF8FF</color>
+    <color name="background_dark">#FF121016</color>
+    <color name="surface">#FFFFFBFE</color>
+    <color name="surface_dark">#FF1C1B1F</color>
 </resources>
