@@ -72,13 +72,13 @@ class UrlDownloadFragment : Fragment() {
             request.addOption("--no-playlist")
             request.addOption("--no-warnings")
             request.addOption("--skip-download")
-            request.addOption("--dump-json")
+            request.addOption("--print-json")
 
-            val result = withContext(Dispatchers.IO) {
-                YoutubeDL.getInstance().getInfo(request)
+            val response = withContext(Dispatchers.IO) {
+                YoutubeDL.getInstance().execute(request)
             }
 
-            val json = JSONObject(result.out)
+            val json = JSONObject(response.out)
             currentTitle = json.optString("title", "Video")
             currentVideoId = json.optString("id", "")
 
