@@ -9,14 +9,24 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.musicchapa.R
 import com.musicchapa.ui.adapters.YoutubeResultAdapter
 import kotlinx.coroutines.*
-import org.json.JSONObject
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
 import java.io.File
+import java.io.FileOutputStream
 import java.net.URL
+import java.util.concurrent.TimeUnit
 
 class YoutubeFragment : Fragment() {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private val results = mutableListOf<Pair<String, String>>() // title, videoId
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+    private val results = mutableListOf<YoutubeResult>()
+
+    data class YoutubeResult(val title: String, val videoId: String, val author: String, val duration: Long)
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_youtube, container, false)
@@ -31,42 +41,86 @@ class YoutubeFragment : Fragment() {
         view.findViewById<android.widget.ImageButton>(R.id.search_btn).setOnClickListener {
             val query = searchInput.text.toString().trim()
             if (query.isNotEmpty()) {
-                scope.launch { searchYoutube(query, adapter) }
+                searchInput.text.clear()
+                searchYoutube(query, adapter)
             }
         }
         return view
     }
 
-    private suspend fun searchYoutube(query: String, adapter: YoutubeResultAdapter) = withContext(Dispatchers.IO) {
-        try {
-            val url = URL("https://www.youtube.com/results?search_query=${java.net.URLEncoder.encode(query, "UTF-8")}")
-            val html = url.readText()
-            // Simple extract of video IDs and titles from search results
-            val regex = Regex("""videoId":"([^"]+)",""")
-            val titleRegex = Regex("""title":{"runs":\[{"text":"([^"]+)"}""")
-            val ids = regex.findAll(html).map { it.groupValues[1] }.distinct().take(15).toList()
-            val titles = titleRegex.findAll(html).map { it.groupValues[1] }.take(15).toList()
-            val pairs = ids.zip(titles.ifEmpty { ids.map { "Unknown" } })
-            withContext(Dispatchers.Main) {
+    private fun searchYoutube(query: String, adapter: YoutubeResultAdapter) {
+        scope.launch {
+            try {
                 results.clear()
-                results.addAll(pairs)
                 adapter.notifyDataSetChanged()
-            }
-        } catch (e: Exception) {
-            // Fallback: show error silently
+
+                val instances = listOf("inv.nadeko.net", "invidious.snopyta.org", "yewtu.be")
+                var jsonStr: String? = null
+                for (instance in instances) {
+                    try {
+                        val url = "https://$instance/api/v1/search?q=${java.net.URLEncoder.encode(query, "UTF-8")}"
+                        val request = Request.Builder().url(url).build()
+                        jsonStr = withContext(Dispatchers.IO) {
+                            client.newCall(request).execute().body?.string()
+                        }
+                        if (jsonStr != null) break
+                    } catch (_: Exception) { continue }
+                }
+
+                if (jsonStr == null) return@launch
+
+                val arr = JSONArray(jsonStr)
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    if (item.getString("type") == "video") {
+                        results.add(YoutubeResult(
+                            title = item.optString("title", "Unknown"),
+                            videoId = item.optString("videoId", ""),
+                            author = item.optString("author", ""),
+                            duration = item.optLong("lengthSeconds", 0)
+                        ))
+                    }
+                }
+                adapter.notifyDataSetChanged()
+            } catch (_: Exception) {}
         }
     }
 
     private suspend fun downloadAudio(videoId: String) = withContext(Dispatchers.IO) {
         try {
-            // Use invidious or youtube audio URL pattern
-            val audioUrl = "https://www.youtube.com/watch?v=$videoId"
+            val instances = listOf("inv.nadeko.net", "invidious.snopyta.org", "yewtu.be")
+            var audioUrl: String? = null
+            outer@ for (instance in instances) {
+                try {
+                    val infoUrl = "https://$instance/api/v1/videos/$videoId"
+                    val request = Request.Builder().url(infoUrl).build()
+                    val jsonStr = client.newCall(request).execute().body?.string() ?: continue
+                    val json = org.json.JSONObject(jsonStr)
+                    val formats = json.optJSONArray("adaptiveFormats")
+                    if (formats != null) {
+                        for (j in 0 until formats.length()) {
+                            val fmt = formats.getJSONObject(j)
+                            if (fmt.optString("encoding") == "aac" || fmt.optString("type")?.startsWith("audio") == true) {
+                                audioUrl = fmt.optString("url")
+                                if (audioUrl != null) break@outer
+                            }
+                        }
+                    }
+                } catch (_: Exception) { continue }
+            }
+
+            if (audioUrl == null) return@withContext
+
             val dir = File(requireContext().getExternalFilesDir(null), "MusicChapa/downloads")
             dir.mkdirs()
             val file = File(dir, "${videoId}_${System.currentTimeMillis()}.mp3")
-            // For actual YouTube audio extraction, we recommend using yt-dlp or similar tool
-            // This is a placeholder - full implementation requires additional libraries
-            file.createNewFile()
+            val connection = URL(audioUrl).openConnection()
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+            val input = connection.getInputStream()
+            val output = FileOutputStream(file)
+            input.copyTo(output, bufferSize = 8192)
+            input.close()
+            output.close()
         } catch (_: Exception) {}
     }
 
