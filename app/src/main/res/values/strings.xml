@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">MusicChapa</string>
+    <string name="library">Biblioteca</string>
+    <string name="youtube">YouTube</string>
+    <string name="url_download">URL</string>
+    <string name="settings">Ajustes</string>
+    <string name="search_hint">Buscar canción o artista...</string>
+    <string name="url_hint">https://ejemplo.com/cancion.mp3</string>
+    <string name="download">Descargar</string>
+    <string name="no_songs">No hay canciones descargadas todavía</string>
+    <string name="no_results">Buscá una canción para empezar</string>
+    <string name="downloading">Descargando...</string>
+    <string name="error_download">Error al descargar</string>
+    <string name="download_complete">Descarga completa</string>
+</resources>
