@@ -5,7 +5,7 @@
     <string name="url_download">URL</string>
     <string name="settings">Ajustes</string>
     <string name="search_hint">Buscar canción o artista...</string>
-    <string name="url_hint">https://ejemplo.com/cancion.mp3</string>
+    <string name="url_hint">Link de YouTube o MP3 directo</string>
     <string name="download">Descargar</string>
     <string name="no_songs">No hay canciones descargadas todavía</string>
     <string name="no_results">Buscá una canción para empezar</string>
