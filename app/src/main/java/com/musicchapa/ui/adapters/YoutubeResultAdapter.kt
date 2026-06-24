@@ -12,7 +12,7 @@ class YoutubeResultAdapter(
     private val onDownload: (String) -> Unit
 ) : RecyclerView.Adapter<YoutubeResultAdapter.ViewHolder>() {
 
-    class ViewHolder(view: View) : RecyclerView.Adapter.ViewHolder(view) {
+    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val title: TextView = view.findViewById(R.id.song_title)
         val artist: TextView = view.findViewById(R.id.song_detail)
     }
