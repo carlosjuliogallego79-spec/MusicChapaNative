@@ -13,12 +13,11 @@ import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.musicchapa.R
 import com.musicchapa.ui.adapters.YoutubeResultAdapter
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -63,7 +62,7 @@ class YoutubeFragment : Fragment() {
                 Toast.makeText(context, "Buscando...", Toast.LENGTH_SHORT).show()
 
                 val searchUrl = "ytsearch10:$query"
-                val req = com.yausername.youtubedl_android.YoutubeDLRequest(searchUrl)
+                val req = YoutubeDLRequest(searchUrl)
                 req.addOption("--no-playlist")
                 req.addOption("--no-warnings")
                 req.addOption("--no-check-certificate")
@@ -73,7 +72,7 @@ class YoutubeFragment : Fragment() {
                 req.addOption("--flat-playlist")
 
                 val resp = withContext(Dispatchers.IO) {
-                    com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(req)
+                    YoutubeDL.getInstance().execute(req)
                 }
 
                 val lines = resp.out.trim().split("\n")
@@ -102,9 +101,53 @@ class YoutubeFragment : Fragment() {
     private fun downloadAudio(videoId: String) {
         scope.launch {
             val ctx = requireContext()
-            Toast.makeText(ctx, "Descargando...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(ctx, "Analizando...", Toast.LENGTH_SHORT).show()
 
-            val result = withContext(Dispatchers.IO) { downloadWithInnerTube(videoId, ctx) }
+            // Step 1: Get video info with yt-dlp
+            val json = withContext(Dispatchers.IO) {
+                try {
+                    val req = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+                    req.addOption("--no-playlist")
+                    req.addOption("--no-warnings")
+                    req.addOption("--no-check-certificate")
+                    req.addOption("--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    req.addOption("--skip-download")
+                    req.addOption("--print-json")
+                    JSONObject(YoutubeDL.getInstance().execute(req).out)
+                } catch (e: Exception) { null }
+            }
+            if (json == null) {
+                Toast.makeText(ctx, "Error: no se pudo obtener info", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            // Step 2: Try to find a direct audio URL
+            val formats = json.optJSONArray("formats")
+            var audioUrl: String? = null
+            var ext = "m4a"
+            if (formats != null) {
+                for (i in 0 until formats.length()) {
+                    val f = formats.getJSONObject(i)
+                    val vcodec = f.optString("vcodec", "none")
+                    val acodec = f.optString("acodec", "none")
+                    if (vcodec == "none" && acodec != "none") {
+                        val u = f.optString("url")
+                        if (u.isNotEmpty()) {
+                            audioUrl = u
+                            ext = f.optString("ext", "m4a")
+                            break
+                        }
+                    }
+                }
+            }
+
+            val result: String?
+            if (audioUrl != null) {
+                result = withContext(Dispatchers.IO) { downloadDirect(audioUrl, ext, ctx) }
+            } else {
+                result = withContext(Dispatchers.IO) { downloadWithYtdlp(videoId, ctx) }
+            }
+
             if (result == null) {
                 Toast.makeText(ctx, "Completa ✓", Toast.LENGTH_SHORT).show()
             } else {
@@ -113,114 +156,77 @@ class YoutubeFragment : Fragment() {
         }
     }
 
-    private fun downloadWithInnerTube(videoId: String, ctx: android.content.Context): String? {
+    private fun downloadDirect(url: String, ext: String, ctx: android.content.Context): String? {
         try {
-            val bodyJson = JSONObject().apply {
-                put("videoId", videoId)
-                put("context", JSONObject().apply {
-                    put("client", JSONObject().apply {
-                        put("clientName", "ANDROID")
-                        put("clientVersion", "19.09.37")
-                        put("androidSdkVersion", 30)
-                    })
-                })
-            }
-            val request = Request.Builder()
-                .url("https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")
-                .header("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip")
-                .header("Content-Type", "application/json")
-                .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-            val response = client.newCall(request).execute()
-            val jsonStr = response.body?.string() ?: return "Error: sin respuesta"
-            val json = JSONObject(jsonStr)
-
-            val streamingData = json.optJSONObject("streamingData") ?: return "Error: sin streaming data"
-            val formats = streamingData.optJSONArray("adaptiveFormats") ?: return "Error: sin formatos"
-
-            var audioUrl: String? = null
-            var bestBitrate = -1
-            for (i in 0 until formats.length()) {
-                val f = formats.getJSONObject(i)
-                val mime = f.optString("mimeType", "")
-                if (!mime.startsWith("audio")) continue
-                val bitrate = f.optInt("bitrate", 0)
-                if (bitrate > bestBitrate) {
-                    bestBitrate = bitrate
-                    audioUrl = f.optString("url")
-                    if (audioUrl.isNullOrEmpty()) {
-                        val cipher = f.optString("cipher", f.optString("signatureCipher", ""))
-                        if (cipher.isNotEmpty()) {
-                            val params = cipher.split("&").associate {
-                                val parts = it.split("=", limit = 2)
-                                parts[0] to java.net.URLDecoder.decode(parts.getOrNull(1) ?: "", "UTF-8")
-                            }
-                            val sp = params["sp"] ?: "signature"
-                            val sig = params[sp] ?: params["s"] ?: continue
-                            audioUrl = params["url"] ?: continue
-                            audioUrl = "$audioUrl&$sp=$sig"
-                        }
-                    }
-                }
-            }
-
-            if (audioUrl.isNullOrEmpty()) return "Error: URL no encontrada"
-
-            val tempFile = File(ctx.cacheDir, "audio_${videoId.take(8)}.m4a")
-
-            val audioRequest = Request.Builder().url(audioUrl)
+            val req = Request.Builder().url(url)
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
                 .header("Referer", "https://www.youtube.com/")
                 .header("Origin", "https://www.youtube.com")
                 .build()
-            val audioResponse = client.newCall(audioRequest).execute()
-            if (!audioResponse.isSuccessful) {
-                audioResponse.close()
-                return "Error HTTP: ${audioResponse.code}"
-            }
-            val body = audioResponse.body ?: return "Error: sin body"
-            if (body.contentLength() == 0L) { audioResponse.close(); return "Error: vacío" }
+            val resp = client.newCall(req).execute()
+            if (!resp.isSuccessful) { resp.close(); return "HTTP ${resp.code}" }
+            val body = resp.body ?: return "sin body"
+            if (body.contentLength() == 0L) { resp.close(); return "vacío" }
 
-            body.byteStream().use { input ->
-                tempFile.outputStream().use { out ->
-                    input.copyTo(out, bufferSize = 65536)
-                }
-            }
-            audioResponse.close()
-            if (!tempFile.exists() || tempFile.length() == 0L) { tempFile.delete(); return "Error: descarga vacía" }
+            val tempFile = File(ctx.cacheDir, "audio_${System.currentTimeMillis()}.$ext")
+            body.byteStream().use { input -> tempFile.outputStream().use { out -> input.copyTo(out, bufferSize = 65536) } }
+            resp.close()
+            if (!tempFile.exists() || tempFile.length() == 0L) { tempFile.delete(); return "descarga vacía" }
 
-            val fileName = "${videoId.take(8)}_${System.currentTimeMillis()}.m4a"
-            if (Build.VERSION.SDK_INT >= 29) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.MIME_TYPE, "audio/mp4")
-                    put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
-                    put(MediaStore.Downloads.IS_PENDING, 1)
-                    put(MediaStore.Downloads.SIZE, tempFile.length())
-                }
-                val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    val output = ctx.contentResolver.openOutputStream(uri)
-                    if (output != null) {
-                        tempFile.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
-                        values.clear()
-                        values.put(MediaStore.Downloads.IS_PENDING, 0)
-                        ctx.contentResolver.update(uri, values, null, null)
-                        tempFile.delete()
-                        return null
-                    }
-                }
-                return "Error: no se pudo guardar"
-            } else {
-                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
-                dir.mkdirs()
-                tempFile.copyTo(File(dir, fileName), overwrite = true)
-                tempFile.delete()
-                return null
+            saveFile(ctx, tempFile, ext)
+            return null
+        } catch (e: Exception) { return e.message }
+    }
+
+    private fun downloadWithYtdlp(videoId: String, ctx: android.content.Context): String? {
+        try {
+            val dir = File(ctx.cacheDir, "ytdlp")
+            dir.mkdirs()
+            val req = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+            req.addOption("--no-playlist")
+            req.addOption("--no-warnings")
+            req.addOption("--no-check-certificate")
+            req.addOption("--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            req.addOption("--extract-audio")
+            req.addOption("--audio-format", "mp3")
+            req.addOption("--audio-quality", "0")
+            req.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
+            req.addOption("-f", "bestaudio/best")
+
+            YoutubeDL.getInstance().execute(req)
+            val mp3 = dir.listFiles()?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
+            if (mp3 == null || !mp3.exists() || mp3.length() == 0L) return "no se generó MP3"
+            saveFile(ctx, mp3, "mp3")
+            return null
+        } catch (e: Exception) { return e.message ?: "error" }
+    }
+
+    private fun saveFile(ctx: android.content.Context, file: File, ext: String) {
+        val fileName = "audio_${System.currentTimeMillis()}.$ext"
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, if (ext == "mp3") "audio/mpeg" else "audio/mp4")
+                put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+                put(MediaStore.Downloads.SIZE, file.length())
             }
-        } catch (e: Exception) {
-            return e.message ?: "Error desconocido"
+            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                val output = ctx.contentResolver.openOutputStream(uri)
+                if (output != null) {
+                    file.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    ctx.contentResolver.update(uri, values, null, null)
+                }
+            }
+        } else {
+            val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
+            publicDir.mkdirs()
+            file.copyTo(File(publicDir, fileName), overwrite = true)
         }
+        file.delete()
     }
 
     override fun onDestroy() {
