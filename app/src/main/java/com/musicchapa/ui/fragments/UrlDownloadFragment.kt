@@ -9,23 +9,31 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
-import android.widget.Toast
 import androidx.fragment.app.Fragment
 import com.musicchapa.R
-import com.yausername.ffmpeg.FFmpeg
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
+import java.net.URL
+import java.util.concurrent.TimeUnit
 
 class UrlDownloadFragment : Fragment() {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
     private var currentFormats = mutableListOf<AudioFormat>()
     private var currentUrl = ""
 
-    data class AudioFormat(val formatId: String, val label: String)
+    data class AudioFormat(val itag: Int, val label: String, val bitrate: Int)
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_url_download, container, false)
@@ -47,17 +55,25 @@ class UrlDownloadFragment : Fragment() {
 
     private suspend fun analyzeUrl(url: String, statusText: android.widget.TextView, spinner: android.widget.Spinner) {
         currentFormats.clear()
-        val json = getInfoWithFallback(url)
-        if (json == null) {
-            statusText.text = "Error: no se pudo obtener info del video"
+        val videoId = extractYoutubeId(url)
+        if (videoId == null) {
+            statusText.text = "Error: link de YouTube no válido"
             return
         }
 
-        val title = json.optString("title", "Video")
-        currentFormats.add(AudioFormat("bestaudio/best", "MP3 192kbps"))
-        currentFormats.add(AudioFormat("bestaudio", "MP3 mejor calidad"))
+        val formats = withContext(Dispatchers.IO) { getAudioFormats(videoId) }
+        if (formats == null) {
+            statusText.text = "Error: no se pudieron obtener formatos"
+            return
+        }
 
-        val labels = currentFormats.map { "${it.label} - ${title.take(50)}" }
+        currentFormats.addAll(formats)
+        if (currentFormats.isEmpty()) {
+            statusText.text = "Error: sin formatos de audio"
+            return
+        }
+
+        val labels = currentFormats.map { it.label }
         spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_dropdown_item, labels)
         spinner.visibility = View.VISIBLE
         statusText.text = "Seleccioná formato"
@@ -69,8 +85,8 @@ class UrlDownloadFragment : Fragment() {
                 val fmt = currentFormats[pos]
                 statusText.text = "Descargando..."
                 scope.launch {
-                    val result = downloadMp3(url, fmt.formatId, title, statusText)
-                    statusText.text = result ?: "Completa ✓"
+                    val result = downloadAudio(videoId, fmt.itag)
+                    statusText.text = if (result == null) "Completa ✓" else "Error: $result"
                     spinner.visibility = View.GONE
                 }
             }
@@ -78,120 +94,180 @@ class UrlDownloadFragment : Fragment() {
         }
     }
 
-    private suspend fun updateYtDlp() {
-        try {
-            withContext(Dispatchers.IO) {
-                YoutubeDL.getInstance().updateYoutubeDL(requireContext())
-            }
-        } catch (_: Exception) {}
-    }
-
-    private suspend fun getInfoWithFallback(url: String): JSONObject? = withContext(Dispatchers.IO) {
-        updateYtDlp()
-
-        val strategies = listOf(
-            mapOf("ua" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "ext" to ""),
-            mapOf("ua" to "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip", "ext" to "youtube:player_client=android"),
-            mapOf("ua" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36", "ext" to "youtube:player_client=web")
+    private fun extractYoutubeId(url: String): String? {
+        val patterns = listOf(
+            Regex("""(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})"""),
+            Regex("""^([a-zA-Z0-9_-]{11})$""")
         )
-
-        for (strategy in strategies) {
-            try {
-                val req = YoutubeDLRequest(url)
-                req.addOption("--no-playlist")
-                req.addOption("--no-warnings")
-                req.addOption("--no-check-certificate")
-                req.addOption("--extractor-retries", "3")
-                req.addOption("--user-agent", strategy["ua"]!!)
-                if (strategy["ext"]!!.isNotEmpty()) {
-                    req.addOption("--extractor-args", strategy["ext"]!!)
-                }
-                req.addOption("--skip-download")
-                req.addOption("--print-json")
-                val resp = YoutubeDL.getInstance().execute(req)
-                return@withContext JSONObject(resp.out)
-            } catch (_: Exception) { continue }
+        for (p in patterns) {
+            p.find(url)?.let { return it.groupValues[1] }
         }
-        return@withContext null
+        return null
     }
 
-    private suspend fun downloadMp3(url: String, formatId: String, title: String, statusText: android.widget.TextView): String? = withContext(Dispatchers.IO) {
-        val ctx = requireContext()
-        val dir = File(ctx.cacheDir, "ytdlp")
-        dir.mkdirs()
-        updateYtDlp()
+    private fun getAudioFormats(videoId: String): List<AudioFormat>? {
+        try {
+            val bodyJson = JSONObject().apply {
+                put("videoId", videoId)
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "ANDROID")
+                        put("clientVersion", "19.09.37")
+                        put("androidSdkVersion", 30)
+                    })
+                })
+            }
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")
+                .header("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip")
+                .header("Content-Type", "application/json")
+                .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            val response = client.newCall(request).execute()
+            val jsonStr = response.body?.string() ?: return null
+            val json = JSONObject(jsonStr)
 
-        val strategies = listOf(
-            mapOf(
-                "ua" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "ext" to ""
-            ),
-            mapOf(
-                "ua" to "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-                "ext" to "youtube:player_client=android"
-            ),
-            mapOf(
-                "ua" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36",
-                "ext" to "youtube:player_client=web"
-            )
-        )
+            val streamingData = json.optJSONObject("streamingData") ?: return null
+            val formats = streamingData.optJSONArray("adaptiveFormats") ?: return null
 
-        for (strategy in strategies) {
-            try {
-                val req = YoutubeDLRequest(url)
-                req.addOption("--no-playlist")
-                req.addOption("--no-warnings")
-                req.addOption("--no-check-certificate")
-                req.addOption("--extractor-retries", "3")
-                req.addOption("--user-agent", strategy["ua"]!!)
-                if (strategy["ext"]!!.isNotEmpty()) {
-                    req.addOption("--extractor-args", strategy["ext"]!!)
+            val result = mutableListOf<AudioFormat>()
+            for (i in 0 until formats.length()) {
+                val f = formats.getJSONObject(i)
+                val mime = f.optString("mimeType", "")
+                if (!mime.startsWith("audio")) continue
+                val itag = f.optInt("itag", 0)
+                val bitrate = f.optInt("bitrate", 0)
+                val label = when (itag) {
+                    140 -> "M4A 128kbps"
+                    251 -> "Opus 160kbps"
+                    250 -> "Opus 70kbps"
+                    249 -> "Opus 50kbps"
+                    else -> "${bitrate / 1000}kbps"
                 }
-                req.addOption("--extract-audio")
-                req.addOption("--audio-format", "mp3")
-                req.addOption("--audio-quality", "0")
-                req.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
-                req.addOption("-f", "$formatId")
+                result.add(AudioFormat(itag, label, bitrate))
+            }
+            result.sortByDescending { it.bitrate }
+            return result
+        } catch (_: Exception) { return null }
+    }
 
-                YoutubeDL.getInstance().execute(req)
+    private suspend fun downloadAudio(videoId: String, itag: Int): String? = withContext(Dispatchers.IO) {
+        try {
+            val ctx = requireContext()
 
-                val mp3 = dir.listFiles()?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
-                if (mp3 != null && mp3.exists() && mp3.length() > 0) {
-                    val safeName = title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(50)
-                    val fileName = "${safeName}_${System.currentTimeMillis()}.mp3"
+            val bodyJson = JSONObject().apply {
+                put("videoId", videoId)
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "ANDROID")
+                        put("clientVersion", "19.09.37")
+                        put("androidSdkVersion", 30)
+                    })
+                })
+            }
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")
+                .header("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip")
+                .header("Content-Type", "application/json")
+                .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            val response = client.newCall(request).execute()
+            val jsonStr = response.body?.string() ?: return@withContext "Error: sin respuesta"
+            val json = JSONObject(jsonStr)
 
-                    if (Build.VERSION.SDK_INT >= 29) {
-                        val values = ContentValues().apply {
-                            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                            put(MediaStore.Downloads.MIME_TYPE, "audio/mpeg")
-                            put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
-                            put(MediaStore.Downloads.IS_PENDING, 1)
-                            put(MediaStore.Downloads.SIZE, mp3.length())
-                        }
-                        val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                        if (uri != null) {
-                            val output = ctx.contentResolver.openOutputStream(uri)
-                            if (output != null) {
-                                mp3.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
-                                values.clear()
-                                values.put(MediaStore.Downloads.IS_PENDING, 0)
-                                ctx.contentResolver.update(uri, values, null, null)
-                                mp3.delete()
-                                return@withContext null
+            val streamingData = json.optJSONObject("streamingData") ?: return@withContext "Error: sin streaming data"
+            val formats = streamingData.optJSONArray("adaptiveFormats") ?: return@withContext "Error: sin formatos"
+
+            var audioUrl: String? = null
+            for (i in 0 until formats.length()) {
+                val f = formats.getJSONObject(i)
+                if (f.optInt("itag", 0) == itag || (itag == 0 && f.optString("mimeType", "").startsWith("audio"))) {
+                    audioUrl = f.optString("url")
+                    if (audioUrl.isNullOrEmpty()) {
+                        val cipher = f.optString("cipher", f.optString("signatureCipher", ""))
+                        if (cipher.isNotEmpty()) {
+                            val params = cipher.split("&").associate {
+                                val parts = it.split("=", limit = 2)
+                                parts[0] to java.net.URLDecoder.decode(parts.getOrNull(1) ?: "", "UTF-8")
                             }
+                            val sp = params["sp"] ?: "signature"
+                            val sig = params[sp] ?: params["s"] ?: continue
+                            audioUrl = params["url"] ?: continue
+                            audioUrl = "$audioUrl&$sp=$sig"
                         }
-                    } else {
-                        val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
-                        publicDir.mkdirs()
-                        mp3.copyTo(File(publicDir, fileName), overwrite = true)
-                        mp3.delete()
+                    }
+                    if (!audioUrl.isNullOrEmpty()) break
+                }
+            }
+
+            if (audioUrl.isNullOrEmpty()) {
+                return@withContext "Error: URL de audio no encontrada"
+            }
+
+            val ext = if (itag == 140 || itag == 0) "m4a" else "opus"
+            val tempFile = File(ctx.cacheDir, "audio_${videoId.take(8)}.$ext")
+
+            val audioRequest = Request.Builder().url(audioUrl)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
+                .header("Referer", "https://www.youtube.com/")
+                .header("Origin", "https://www.youtube.com")
+                .build()
+            val audioResponse = client.newCall(audioRequest).execute()
+            if (!audioResponse.isSuccessful) {
+                audioResponse.close()
+                return@withContext "Error HTTP: ${audioResponse.code}"
+            }
+            val body = audioResponse.body ?: return@withContext "Error: sin body"
+            val length = body.contentLength()
+            if (length == 0L) {
+                audioResponse.close()
+                return@withContext "Error: archivo vacío"
+            }
+
+            body.byteStream().use { input ->
+                tempFile.outputStream().use { out ->
+                    input.copyTo(out, bufferSize = 65536)
+                }
+            }
+            audioResponse.close()
+
+            if (!tempFile.exists() || tempFile.length() == 0L) {
+                tempFile.delete()
+                return@withContext "Error: descarga vacía"
+            }
+
+            val fileName = "${videoId.take(8)}_${System.currentTimeMillis()}.$ext"
+            if (Build.VERSION.SDK_INT >= 29) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, if (ext == "m4a") "audio/mp4" else "audio/opus")
+                    put(MediaStore.Downloads.RELATIVE_PATH, "Download/MusicChapa")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                    put(MediaStore.Downloads.SIZE, tempFile.length())
+                }
+                val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    val output = ctx.contentResolver.openOutputStream(uri)
+                    if (output != null) {
+                        tempFile.inputStream().use { input -> output.use { out -> input.copyTo(out, bufferSize = 65536) } }
+                        values.clear()
+                        values.put(MediaStore.Downloads.IS_PENDING, 0)
+                        ctx.contentResolver.update(uri, values, null, null)
+                        tempFile.delete()
                         return@withContext null
                     }
-                    mp3.delete()
                 }
-            } catch (e: Exception) { continue }
+                return@withContext "Error: no se pudo guardar"
+            } else {
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MusicChapa")
+                dir.mkdirs()
+                tempFile.copyTo(File(dir, fileName), overwrite = true)
+                tempFile.delete()
+                return@withContext null
+            }
+        } catch (e: Exception) {
+            return@withContext e.message ?: "Error desconocido"
         }
-        return@withContext "Error: no se pudo descargar (403 bloqueado por YouTube)"
     }
 
     override fun onDestroy() {
