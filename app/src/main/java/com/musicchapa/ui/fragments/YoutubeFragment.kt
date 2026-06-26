@@ -45,12 +45,21 @@ class YoutubeFragment : Fragment() {
         return view
     }
 
+    private suspend fun updateYtDlp() {
+        try {
+            withContext(Dispatchers.IO) {
+                YoutubeDL.getInstance().updateYoutubeDL(requireContext())
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun searchYoutube(query: String, adapter: YoutubeResultAdapter) {
         scope.launch {
             try {
                 results.clear()
                 adapter.notifyDataSetChanged()
                 Toast.makeText(context, "Buscando...", Toast.LENGTH_SHORT).show()
+                updateYtDlp()
 
                 val searchUrl = "ytsearch10:$query"
                 val strategies = listOf(
@@ -115,6 +124,7 @@ class YoutubeFragment : Fragment() {
             dir.mkdirs()
 
             Toast.makeText(ctx, "Descargando MP3...", Toast.LENGTH_SHORT).show()
+            updateYtDlp()
 
             val strategies = listOf(
                 mapOf("ua" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "ext" to ""),

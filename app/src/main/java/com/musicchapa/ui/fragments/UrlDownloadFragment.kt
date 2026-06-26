@@ -78,20 +78,21 @@ class UrlDownloadFragment : Fragment() {
         }
     }
 
+    private suspend fun updateYtDlp() {
+        try {
+            withContext(Dispatchers.IO) {
+                YoutubeDL.getInstance().updateYoutubeDL(requireContext())
+            }
+        } catch (_: Exception) {}
+    }
+
     private suspend fun getInfoWithFallback(url: String): JSONObject? = withContext(Dispatchers.IO) {
+        updateYtDlp()
+
         val strategies = listOf(
-            mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "extractor" to ""
-            ),
-            mapOf(
-                "User-Agent" to "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-                "extractor" to "youtube:player_client=android"
-            ),
-            mapOf(
-                "User-Agent" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36",
-                "extractor" to "youtube:player_client=web"
-            )
+            mapOf("ua" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "ext" to ""),
+            mapOf("ua" to "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip", "ext" to "youtube:player_client=android"),
+            mapOf("ua" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36", "ext" to "youtube:player_client=web")
         )
 
         for (strategy in strategies) {
@@ -101,13 +102,12 @@ class UrlDownloadFragment : Fragment() {
                 req.addOption("--no-warnings")
                 req.addOption("--no-check-certificate")
                 req.addOption("--extractor-retries", "3")
-                req.addOption("--user-agent", strategy["User-Agent"]!!)
-                if (strategy["extractor"]!!.isNotEmpty()) {
-                    req.addOption("--extractor-args", strategy["extractor"]!!)
+                req.addOption("--user-agent", strategy["ua"]!!)
+                if (strategy["ext"]!!.isNotEmpty()) {
+                    req.addOption("--extractor-args", strategy["ext"]!!)
                 }
                 req.addOption("--skip-download")
                 req.addOption("--print-json")
-
                 val resp = YoutubeDL.getInstance().execute(req)
                 return@withContext JSONObject(resp.out)
             } catch (_: Exception) { continue }
@@ -119,6 +119,7 @@ class UrlDownloadFragment : Fragment() {
         val ctx = requireContext()
         val dir = File(ctx.cacheDir, "ytdlp")
         dir.mkdirs()
+        updateYtDlp()
 
         val strategies = listOf(
             mapOf(
