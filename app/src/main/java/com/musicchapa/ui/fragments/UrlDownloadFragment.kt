@@ -62,12 +62,28 @@ class UrlDownloadFragment : Fragment() {
             return
         }
 
+        // Get song title first
+        val songTitle = withContext(Dispatchers.IO) {
+            try {
+                withTimeout(15_000) {
+                    val req = YoutubeDLRequest(url)
+                    req.addOption("--no-playlist")
+                    req.addOption("--no-warnings")
+                    req.addOption("--no-check-certificate")
+                    req.addOption("--skip-download")
+                    req.addOption("--print", "title")
+                    YoutubeDL.getInstance().execute(req).out.trim()
+                }
+            } catch (_: Exception) { null }
+        } ?: "audio_${System.currentTimeMillis()}"
+
+        val safeTitle = songTitle.replace(Regex("""[\\/:*?"<>|]"""), "_").take(100)
+
         val result = withContext(Dispatchers.IO) {
             try {
                 val dir = File(ctx.cacheDir, "ytdlp")
                 dir.mkdirs()
 
-                val timestamp = System.currentTimeMillis()
                 withTimeout(180_000) {
                     val req = YoutubeDLRequest(url)
                     req.addOption("--no-playlist")
@@ -77,15 +93,15 @@ class UrlDownloadFragment : Fragment() {
                     req.addOption("--extract-audio")
                     req.addOption("--audio-format", "mp3")
                     req.addOption("--audio-quality", "0")
-                    req.addOption("-o", "${dir.absolutePath}/$timestamp.%(ext)s")
+                    req.addOption("-o", "${dir.absolutePath}/$safeTitle.%(ext)s")
                     req.addOption("-f", "bestaudio/best")
                     YoutubeDL.getInstance().execute(req)
                 }
 
-                val mp3 = File(dir, "$timestamp.mp3")
+                val mp3 = File(dir, "$safeTitle.mp3")
                 if (!mp3.exists() || mp3.length() == 0L) return@withContext "no se generó MP3"
 
-                saveToDownloads(mp3)
+                saveToDownloads(mp3, songTitle)
                 null
             } catch (e: Exception) { e.message ?: "error" }
         }
@@ -93,10 +109,10 @@ class UrlDownloadFragment : Fragment() {
         statusText.text = if (result == null) "Completa ✓" else "Error: $result"
     }
 
-    private fun saveToDownloads(file: File) {
+    private fun saveToDownloads(file: File, title: String) {
         val ctx = requireContext()
-        val songTitle = file.nameWithoutExtension
-        val fileName = "${songTitle}_${System.currentTimeMillis()}.mp3"
+        val safe = title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(100)
+        val fileName = "$safe.mp3"
         if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)

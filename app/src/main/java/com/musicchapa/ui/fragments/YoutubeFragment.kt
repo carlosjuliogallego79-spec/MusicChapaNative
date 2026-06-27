@@ -110,6 +110,24 @@ class YoutubeFragment : Fragment() {
 
             val url = "https://www.youtube.com/watch?v=$videoId"
             progressBar.visibility = View.VISIBLE
+            Toast.makeText(ctx, "Obteniendo título...", Toast.LENGTH_SHORT).show()
+
+            val songTitle = withContext(Dispatchers.IO) {
+                try {
+                    withTimeout(15_000) {
+                        val req = YoutubeDLRequest(url)
+                        req.addOption("--no-playlist")
+                        req.addOption("--no-warnings")
+                        req.addOption("--no-check-certificate")
+                        req.addOption("--skip-download")
+                        req.addOption("--print", "title")
+                        YoutubeDL.getInstance().execute(req).out.trim()
+                    }
+                } catch (_: Exception) { null }
+            } ?: "audio_${System.currentTimeMillis()}"
+
+            val safeTitle = songTitle.replace(Regex("""[\\/:*?"<>|]"""), "_").take(100)
+
             Toast.makeText(ctx, "Descargando...", Toast.LENGTH_SHORT).show()
 
             val result = withContext(Dispatchers.IO) {
@@ -117,7 +135,6 @@ class YoutubeFragment : Fragment() {
                     val dir = File(ctx.cacheDir, "ytdlp")
                     dir.mkdirs()
 
-                    val timestamp = System.currentTimeMillis()
                     withTimeout(180_000) {
                         val req = YoutubeDLRequest(url)
                         req.addOption("--no-playlist")
@@ -127,15 +144,15 @@ class YoutubeFragment : Fragment() {
                         req.addOption("--extract-audio")
                         req.addOption("--audio-format", "mp3")
                         req.addOption("--audio-quality", "0")
-                        req.addOption("-o", "${dir.absolutePath}/$timestamp.%(ext)s")
+                        req.addOption("-o", "${dir.absolutePath}/$safeTitle.%(ext)s")
                         req.addOption("-f", "bestaudio/best")
                         YoutubeDL.getInstance().execute(req)
                     }
 
-                    val mp3 = File(dir, "$timestamp.mp3")
+                    val mp3 = File(dir, "$safeTitle.mp3")
                     if (!mp3.exists() || mp3.length() == 0L) return@withContext "no se generó MP3"
 
-                    saveFile(ctx, mp3)
+                    saveFile(ctx, mp3, songTitle)
                     null
                 } catch (e: Exception) { e.message ?: "error" }
             }
@@ -146,8 +163,9 @@ class YoutubeFragment : Fragment() {
         }
     }
 
-    private fun saveFile(ctx: android.content.Context, file: File) {
-        val fileName = "${file.nameWithoutExtension}_${System.currentTimeMillis()}.mp3"
+    private fun saveFile(ctx: android.content.Context, file: File, title: String) {
+        val safe = title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(100)
+        val fileName = "$safe.mp3"
         if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)
