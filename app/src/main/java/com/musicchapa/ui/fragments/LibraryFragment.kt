@@ -9,6 +9,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageButton
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.Fragment
@@ -16,6 +17,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.musicchapa.R
 import com.musicchapa.ui.adapters.SongItem
 import com.musicchapa.ui.adapters.SongAdapter
+import kotlinx.coroutines.*
 import java.io.File
 
 class LibraryFragment : Fragment() {
@@ -24,6 +26,9 @@ class LibraryFragment : Fragment() {
     private lateinit var adapter: SongAdapter
     private var mediaPlayer: MediaPlayer? = null
     private var currentPlaying: SongItem? = null
+    private var currentIndex = -1
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var seekUpdateJob: Job? = null
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_library, container, false)
@@ -37,12 +42,30 @@ class LibraryFragment : Fragment() {
         )
         recycler.adapter = adapter
 
-        view.findViewById<ImageButton>(R.id.btn_play).setOnClickListener {
-            togglePlayPause(view)
-        }
+        view.findViewById<ImageButton>(R.id.btn_play).setOnClickListener { togglePlayPause(view) }
+        view.findViewById<ImageButton>(R.id.btn_next).setOnClickListener { playNext(view) }
+        view.findViewById<ImageButton>(R.id.btn_prev).setOnClickListener { playPrev(view) }
+
+        view.findViewById<SeekBar>(R.id.seek_bar).setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    mediaPlayer?.let { mp ->
+                        val pos = (mp.duration * progress) / 1000
+                        mp.seekTo(pos)
+                    }
+                }
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
 
         loadSongs()
         return view
+    }
+
+    override fun onResume() {
+        super.onResume()
+        loadSongs()
     }
 
     private fun loadSongs() {
@@ -101,12 +124,23 @@ class LibraryFragment : Fragment() {
     private fun playSong(item: SongItem, view: View) {
         try {
             mediaPlayer?.release()
+            seekUpdateJob?.cancel()
+
+            val idx = songs.indexOfFirst { it.path == item.path }
+            if (idx >= 0) currentIndex = idx
+
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(item.path)
-                setOnPreparedListener { start() }
+                setOnPreparedListener {
+                    start()
+                    updatePlayerUI(view, item)
+                    startSeekUpdate(view)
+                }
                 setOnCompletionListener {
+                    seekUpdateJob?.cancel()
                     view.findViewById<ImageButton>(R.id.btn_play)?.setImageResource(android.R.drawable.ic_media_play)
-                    currentPlaying = null
+                    // Auto-play next
+                    playNext(view)
                 }
                 prepareAsync()
             }
@@ -115,9 +149,54 @@ class LibraryFragment : Fragment() {
             bar?.visibility = View.VISIBLE
             view.findViewById<TextView>(R.id.player_title)?.text = item.title
             view.findViewById<ImageButton>(R.id.btn_play)?.setImageResource(android.R.drawable.ic_media_pause)
+            view.findViewById<SeekBar>(R.id.seek_bar)?.progress = 0
         } catch (e: Exception) {
-            Toast.makeText(context, "Error al reproducir: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun updatePlayerUI(view: View, item: SongItem) {
+        val mp = mediaPlayer ?: return
+        val total = mp.duration / 1000
+        view.findViewById<TextView>(R.id.time_total)?.text = formatTime(total)
+        view.findViewById<TextView>(R.id.time_current)?.text = "0:00"
+        view.findViewById<SeekBar>(R.id.seek_bar)?.max = 1000
+    }
+
+    private fun startSeekUpdate(view: View) {
+        seekUpdateJob?.cancel()
+        seekUpdateJob = scope.launch {
+            while (isActive) {
+                delay(200)
+                val mp = mediaPlayer ?: break
+                if (!mp.isPlaying) continue
+                try {
+                    val pos = mp.currentPosition
+                    val dur = mp.duration
+                    if (dur > 0) {
+                        val progress = (pos * 1000) / dur
+                        view.findViewById<SeekBar>(R.id.seek_bar)?.progress = progress
+                        view.findViewById<TextView>(R.id.time_current)?.text = formatTime(pos / 1000)
+                    }
+                } catch (_: Exception) { break }
+            }
+        }
+    }
+
+    private fun playNext(view: View) {
+        if (currentIndex < 0 || songs.isEmpty()) return
+        val nextIdx = (currentIndex + 1) % songs.size
+        val nextSong = songs.getOrNull(nextIdx) ?: return
+        currentIndex = nextIdx
+        playSong(nextSong, view)
+    }
+
+    private fun playPrev(view: View) {
+        if (currentIndex < 0 || songs.isEmpty()) return
+        val prevIdx = if (currentIndex - 1 < 0) songs.size - 1 else currentIndex - 1
+        val prevSong = songs.getOrNull(prevIdx) ?: return
+        currentIndex = prevIdx
+        playSong(prevSong, view)
     }
 
     private fun togglePlayPause(view: View) {
@@ -130,9 +209,11 @@ class LibraryFragment : Fragment() {
 
         if (player.isPlaying) {
             player.pause()
+            seekUpdateJob?.cancel()
             view.findViewById<ImageButton>(R.id.btn_play)?.setImageResource(android.R.drawable.ic_media_play)
         } else {
             player.start()
+            startSeekUpdate(view)
             view.findViewById<ImageButton>(R.id.btn_play)?.setImageResource(android.R.drawable.ic_media_pause)
         }
     }
@@ -143,8 +224,13 @@ class LibraryFragment : Fragment() {
                 mediaPlayer?.release()
                 mediaPlayer = null
                 currentPlaying = null
+                seekUpdateJob?.cancel()
                 view.findViewById<View>(R.id.player_bar)?.visibility = View.GONE
             }
+            // Update index if playing song was before the deleted one
+            val delIdx = songs.indexOfFirst { it.path == item.path }
+            if (delIdx >= 0 && delIdx < currentIndex) currentIndex--
+
             File(item.path).delete()
             if (Build.VERSION.SDK_INT >= 29) {
                 val where = "${MediaStore.Downloads.DATA}=?"
@@ -157,9 +243,17 @@ class LibraryFragment : Fragment() {
         }
     }
 
+    private fun formatTime(seconds: Int): String {
+        val m = seconds / 60
+        val s = seconds % 60
+        return "$m:${if (s < 10) "0" else ""}$s"
+    }
+
     override fun onDestroy() {
-        super.onDestroy()
+        seekUpdateJob?.cancel()
         mediaPlayer?.release()
         mediaPlayer = null
+        scope.cancel()
+        super.onDestroy()
     }
 }

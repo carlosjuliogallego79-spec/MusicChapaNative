@@ -26,6 +26,7 @@ class YoutubeFragment : Fragment() {
     private val ytdlpScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val results = mutableListOf<YoutubeResult>()
     private var ytdlpReady = false
+    private var pollingJob: Job? = null
 
     data class YoutubeResult(val title: String, val videoId: String, val author: String, val duration: Long)
 
@@ -113,7 +114,7 @@ class YoutubeFragment : Fragment() {
             dir.mkdirs()
             dir.listFiles()?.forEach { it.delete() }
 
-            progressBar.visibility = View.VISIBLE
+            pollingJob = null
 
             val formatOptions = listOf(
                 "bestaudio[ext=m4a]/bestaudio",
@@ -122,8 +123,12 @@ class YoutubeFragment : Fragment() {
             )
 
             for (fmt in formatOptions) {
-                Toast.makeText(ctx, "Descargando...", Toast.LENGTH_SHORT).show()
-                val result = withContext(Dispatchers.IO) {
+                progressBar.visibility = View.VISIBLE
+                progressBar.isIndeterminate = true
+
+                val downloadJob = CompletableDeferred<String?>()
+
+                scope.launch(Dispatchers.IO) {
                     try {
                         withTimeout(120_000) {
                             val req = YoutubeDLRequest(url)
@@ -142,16 +147,44 @@ class YoutubeFragment : Fragment() {
 
                         val mp3 = dir.listFiles()?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
                                 ?: dir.listFiles()?.filter { it.extension == "m4a" }?.maxByOrNull { it.lastModified() }
-                        if (mp3 == null || !mp3.exists() || mp3.length() == 0L) return@withContext "no se generó archivo"
+                        if (mp3 == null || !mp3.exists() || mp3.length() == 0L) {
+                            downloadJob.complete("no se generó")
+                            return@launch
+                        }
 
                         val title = mp3.nameWithoutExtension.replace(Regex("""[\\/:*?"<>|]"""), "_").take(100)
                         saveFile(ctx, mp3, title)
-                        null
-                    } catch (e: Exception) { e.message ?: "error" }
+                        downloadJob.complete(null)
+                    } catch (e: Exception) {
+                        downloadJob.complete(e.message ?: "error")
+                    }
                 }
+
+                pollingJob = scope.launch(Dispatchers.Default) {
+                    while (downloadJob.isActive && !downloadJob.isCompleted) {
+                        delay(500)
+                        val partFiles = dir.listFiles()?.filter { it.name.endsWith(".part") }
+                        val currentFile = partFiles?.maxByOrNull { it.length() }
+                        if (currentFile != null && currentFile.length() > 0) {
+                            val sz = currentFile.length()
+                            withContext(Dispatchers.Main) {
+                                progressBar.isIndeterminate = false
+                                progressBar.max = 10000
+                                val est = minOf(sz * 10000L / 5_000_000L, 9999L)
+                                progressBar.progress = est.toInt()
+                            }
+                        }
+                    }
+                }
+
+                val result = downloadJob.await()
+                pollingJob?.cancel()
+
                 if (result == null) {
-                    progressBar.visibility = View.GONE
+                    progressBar.progress = 100
                     Toast.makeText(ctx, "Completa ✓", Toast.LENGTH_SHORT).show()
+                    delay(800)
+                    progressBar.visibility = View.GONE
                     return@launch
                 }
             }
@@ -190,5 +223,9 @@ class YoutubeFragment : Fragment() {
         file.delete()
     }
 
-    override fun onDestroy() { super.onDestroy(); scope.cancel() }
+    override fun onDestroy() {
+        pollingJob?.cancel()
+        scope.cancel()
+        super.onDestroy()
+    }
 }

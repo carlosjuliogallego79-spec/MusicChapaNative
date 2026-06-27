@@ -9,6 +9,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ProgressBar
+import android.widget.TextView
 import androidx.fragment.app.Fragment
 import com.musicchapa.R
 import com.yausername.youtubedl_android.YoutubeDL
@@ -21,11 +22,12 @@ class UrlDownloadFragment : Fragment() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val ytdlpScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var ytdlpReady = false
+    private var pollingJob: Job? = null
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_url_download, container, false)
         val urlInput = view.findViewById<android.widget.EditText>(R.id.url_input)
-        val statusText = view.findViewById<android.widget.TextView>(R.id.status_text)
+        val statusText = view.findViewById<TextView>(R.id.status_text)
         val progressBar = view.findViewById<ProgressBar>(R.id.progress_bar)
 
         warmupYtdlp()
@@ -35,7 +37,8 @@ class UrlDownloadFragment : Fragment() {
             if (url.isEmpty()) return@setOnClickListener
             urlInput.text.clear()
             progressBar.visibility = View.VISIBLE
-            statusText.text = "Descargando..."
+            progressBar.isIndeterminate = true
+            statusText.text = "Iniciando..."
             scope.launch { downloadAudio(url, statusText, progressBar) }
         }
         return view
@@ -51,7 +54,7 @@ class UrlDownloadFragment : Fragment() {
         }
     }
 
-    private suspend fun downloadAudio(url: String, statusText: android.widget.TextView, progressBar: ProgressBar) {
+    private suspend fun downloadAudio(url: String, statusText: TextView, progressBar: ProgressBar) {
         val ctx = requireContext()
 
         var attempts = 0
@@ -66,7 +69,6 @@ class UrlDownloadFragment : Fragment() {
         dir.mkdirs()
         dir.listFiles()?.forEach { it.delete() }
 
-        // Try formats in order: bestaudio mp3, bestaudio m4a, any audio
         val formatOptions = listOf(
             "bestaudio[ext=m4a]/bestaudio",
             "bestaudio/best",
@@ -74,7 +76,13 @@ class UrlDownloadFragment : Fragment() {
         )
 
         for (fmt in formatOptions) {
-            val result = withContext(Dispatchers.IO) {
+            statusText.text = "Iniciando..."
+            progressBar.isIndeterminate = true
+            pollingJob = null
+
+            val downloadJob = CompletableDeferred<String?>()
+
+            val job = scope.launch(Dispatchers.IO) {
                 try {
                     withTimeout(120_000) {
                         val req = YoutubeDLRequest(url)
@@ -93,21 +101,65 @@ class UrlDownloadFragment : Fragment() {
 
                     val mp3 = dir.listFiles()?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
                             ?: dir.listFiles()?.filter { it.extension == "m4a" }?.maxByOrNull { it.lastModified() }
-                    if (mp3 == null || !mp3.exists() || mp3.length() == 0L) return@withContext "no se generó archivo"
+                    if (mp3 == null || !mp3.exists() || mp3.length() == 0L) {
+                        downloadJob.complete("no se generó")
+                        return@launch
+                    }
 
                     val title = mp3.nameWithoutExtension.replace(Regex("""[\\/:*?"<>|]"""), "_").take(100)
+                    withContext(Dispatchers.Main) {
+                        progressBar.progress = 100
+                        statusText.text = "Guardando..."
+                    }
                     saveToDownloads(mp3, title)
-                    null
-                } catch (e: Exception) { e.message ?: "error" }
+                    downloadJob.complete(null)
+                } catch (e: Exception) {
+                    downloadJob.complete(e.message ?: "error")
+                }
             }
+
+            // Poll for .part files to show progress
+            pollingJob = scope.launch(Dispatchers.Default) {
+                while (downloadJob.isActive && !downloadJob.isCompleted) {
+                    delay(500)
+                    val partFiles = dir.listFiles()?.filter { it.name.endsWith(".part") }
+                    val currentFile = partFiles?.maxByOrNull { it.length() }
+                    if (currentFile != null && currentFile.length() > 0) {
+                        val sz = currentFile.length()
+                        withContext(Dispatchers.Main) {
+                            progressBar.isIndeterminate = false
+                            progressBar.max = 10000
+                            // Show as percentage of estimated max (100MB)
+                            val est = minOf(sz * 10000L / 5_000_000L, 9999L)
+                            progressBar.progress = est.toInt()
+                            statusText.text = formatSize(sz)
+                        }
+                    }
+                }
+            }
+
+            val result = downloadJob.await()
+            pollingJob?.cancel()
+
             if (result == null) {
-                progressBar.visibility = View.GONE
+                progressBar.progress = 100
                 statusText.text = "Completa ✓"
+                delay(800)
+                progressBar.visibility = View.GONE
                 return
             }
+            statusText.text = "Formato $fmt: $result"
         }
         progressBar.visibility = View.GONE
         statusText.text = "Error: no se pudo descargar"
+    }
+
+    private fun formatSize(bytes: Long): String {
+        return when {
+            bytes >= 1024 * 1024 -> "${bytes / (1024 * 1024)} MB"
+            bytes >= 1024 -> "${bytes / 1024} KB"
+            else -> "$bytes B"
+        }
     }
 
     private fun saveToDownloads(file: File, title: String) {
@@ -140,5 +192,9 @@ class UrlDownloadFragment : Fragment() {
         file.delete()
     }
 
-    override fun onDestroy() { super.onDestroy(); scope.cancel() }
+    override fun onDestroy() {
+        pollingJob?.cancel()
+        scope.cancel()
+        super.onDestroy()
+    }
 }
