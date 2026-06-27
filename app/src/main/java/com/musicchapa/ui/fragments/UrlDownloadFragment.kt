@@ -8,7 +8,6 @@ import android.provider.MediaStore
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ArrayAdapter
 import androidx.fragment.app.Fragment
 import com.musicchapa.R
 import com.yausername.youtubedl_android.YoutubeDL
@@ -16,7 +15,6 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -29,107 +27,88 @@ class UrlDownloadFragment : Fragment() {
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
-    private var currentFormats = mutableListOf<AudioFormat>()
-
-    data class AudioFormat(val formatId: String, val label: String, val url: String?)
+    private val ytdlpScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var ytdlpReady = false
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         val view = inflater.inflate(R.layout.fragment_url_download, container, false)
         val urlInput = view.findViewById<android.widget.EditText>(R.id.url_input)
         val statusText = view.findViewById<android.widget.TextView>(R.id.status_text)
-        val formatSpinner = view.findViewById<android.widget.Spinner>(R.id.format_spinner)
-        formatSpinner.visibility = View.GONE
+
+        // Warm up yt-dlp on first creation
+        warmupYtdlp()
 
         view.findViewById<android.widget.Button>(R.id.download_btn).setOnClickListener {
             val url = urlInput.text.toString().trim()
             if (url.isEmpty()) return@setOnClickListener
             urlInput.text.clear()
-            statusText.text = "Analizando..."
-            scope.launch { analyzeUrl(url, statusText, formatSpinner) }
+            statusText.text = "Descargando..."
+            scope.launch { downloadAudio(url, statusText) }
         }
         return view
     }
 
-    private suspend fun analyzeUrl(url: String, statusText: android.widget.TextView, spinner: android.widget.Spinner) {
-        currentFormats.clear()
-
-        val (json, title) = getVideoJson(url)
-        if (json == null) {
-            statusText.text = "Error: no se pudo obtener info"
-            return
-        }
-
-        val formats = json.optJSONArray("formats")
-        if (formats != null) {
-            for (i in 0 until formats.length()) {
-                val f = formats.getJSONObject(i)
-                val vcodec = f.optString("vcodec", "none")
-                val acodec = f.optString("acodec", "none")
-                if (vcodec == "none" && acodec != "none") {
-                    val urlStr = f.optString("url")
-                    val formatId = f.optString("format_id", "")
-                    val abr = f.optInt("abr", f.optInt("tbr", 0))
-                    val ext = f.optString("ext", "m4a")
-                    val label = "$ext ${abr}kbps"
-                    currentFormats.add(AudioFormat(formatId, label, urlStr.ifEmpty { null }))
-                }
+    private fun warmupYtdlp() {
+        ytdlpScope.launch {
+            try {
+                // First try updating yt-dlp
+                YoutubeDL.getInstance().updateYoutubeDL(requireContext())
+            } catch (_: Exception) {}
+            try {
+                val ver = YoutubeDL.getInstance().execute(YoutubeDLRequest("--version"))
+                android.util.Log.i("ytdlp", "Version: ${ver.out.trim()}")
+                ytdlpReady = true
+            } catch (e: Exception) {
+                android.util.Log.e("ytdlp", "Warmup failed", e)
             }
-        }
-
-        currentFormats.add(AudioFormat("bestaudio/best", "MP3 (convertido)", null))
-
-        if (currentFormats.isEmpty()) {
-            statusText.text = "Error: sin formatos disponibles"
-            return
-        }
-
-        val labels = currentFormats.map { "${it.label} - $title" }
-        spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_dropdown_item, labels)
-        spinner.visibility = View.VISIBLE
-        statusText.text = "Seleccioná formato"
-
-        spinner.onItemSelectedListener = null
-        spinner.setSelection(0)
-        spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                val fmt = currentFormats[pos]
-                statusText.text = "Descargando..."
-                scope.launch {
-                    val result = if (fmt.url != null) {
-                        downloadDirect(fmt.url, ext = fmt.label.substringBefore(" "))
-                    } else {
-                        downloadWithYtdlp(url)
-                    }
-                    statusText.text = if (result == null) "Completa ✓" else "Error: $result"
-                    spinner.visibility = View.GONE
-                }
-            }
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
     }
 
-    private suspend fun getVideoJson(url: String): Pair<JSONObject?, String> {
-        try {
-            val req = YoutubeDLRequest(url)
-            req.addOption("--no-playlist")
-            req.addOption("--no-warnings")
-            req.addOption("--no-check-certificate")
-            req.addOption("--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            req.addOption("--skip-download")
-            req.addOption("--print-json")
+    private suspend fun downloadAudio(url: String, statusText: android.widget.TextView) {
+        val ctx = requireContext()
 
-            val resp = withContext(Dispatchers.IO) {
-                YoutubeDL.getInstance().execute(req)
-            }
-            val json = JSONObject(resp.out)
-            val title = json.optString("title", "Audio")
-            return Pair(json, title)
-        } catch (e: Exception) {
-            return Pair(null, "Error: ${e.message}")
+        // Wait for yt-dlp to be ready
+        var attempts = 0
+        while (!ytdlpReady && attempts < 20) {
+            delay(1000)
+            attempts++
         }
+        if (!ytdlpReady) {
+            statusText.text = "Error: yt-dlp no inicializado"
+            return
+        }
+
+        // Try direct URL download with yt-dlp --get-url
+        val audioUrl = withContext(Dispatchers.IO) {
+            try {
+                withTimeout(30_000) {
+                    val req = YoutubeDLRequest(url)
+                    req.addOption("--no-playlist")
+                    req.addOption("--no-warnings")
+                    req.addOption("--no-check-certificate")
+                    req.addOption("--socket-timeout", "10")
+                    req.addOption("--user-agent", "Mozilla/5.0")
+                    req.addOption("--get-url")
+                    req.addOption("-f", "bestaudio[ext=m4a]/bestaudio")
+                    YoutubeDL.getInstance().execute(req).out.trim()
+                }
+            } catch (e: Exception) { null }
+        }
+
+        if (audioUrl != null) {
+            statusText.text = "Descargando audio..."
+            val result = withContext(Dispatchers.IO) { downloadWithOkHttp(audioUrl, "m4a") }
+            statusText.text = if (result == null) "Completa ✓" else "Error: $result"
+            return
+        }
+
+        // Fallback: yt-dlp full download
+        statusText.text = "Descargando con yt-dlp..."
+        val result = withContext(Dispatchers.IO) { downloadWithYtdlp(url) }
+        statusText.text = if (result == null) "Completa ✓" else "Error: $result"
     }
 
-    private suspend fun downloadDirect(url: String, ext: String = "m4a"): String? = withContext(Dispatchers.IO) {
+    private fun downloadWithOkHttp(url: String, ext: String): String? {
         try {
             val ctx = requireContext()
             val req = Request.Builder().url(url)
@@ -138,48 +117,48 @@ class UrlDownloadFragment : Fragment() {
                 .header("Origin", "https://www.youtube.com")
                 .build()
             val resp = client.newCall(req).execute()
-            if (!resp.isSuccessful) { resp.close(); return@withContext "HTTP ${resp.code}" }
-            val body = resp.body ?: return@withContext "sin body"
-            if (body.contentLength() == 0L) { resp.close(); return@withContext "vacío" }
+            if (!resp.isSuccessful) { resp.close(); return "HTTP ${resp.code}" }
+            val body = resp.body ?: return "sin body"
+            if (body.contentLength() == 0L) { resp.close(); return "vacío" }
 
             val tempFile = File(ctx.cacheDir, "audio_${System.currentTimeMillis()}.$ext")
             body.byteStream().use { input -> tempFile.outputStream().use { out -> input.copyTo(out, bufferSize = 65536) } }
             resp.close()
 
-            if (!tempFile.exists() || tempFile.length() == 0L) { tempFile.delete(); return@withContext "descarga vacía" }
+            if (!tempFile.exists() || tempFile.length() == 0L) { tempFile.delete(); return "descarga vacía" }
 
-            saveToDownloads(tempFile, ext)
-            return@withContext null
-        } catch (e: Exception) { return@withContext e.message }
+            saveToDownloads(tempFile, if (ext == "mp3") "mp3" else "m4a")
+            return null
+        } catch (e: Exception) { return e.message }
     }
 
-    private suspend fun downloadWithYtdlp(url: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun downloadWithYtdlp(url: String): String? {
         try {
             val ctx = requireContext()
             val dir = File(ctx.cacheDir, "ytdlp")
             dir.mkdirs()
 
-            val req = YoutubeDLRequest(url)
-            req.addOption("--no-playlist")
-            req.addOption("--no-warnings")
-            req.addOption("--no-check-certificate")
-            req.addOption("--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            req.addOption("--extract-audio")
-            req.addOption("--audio-format", "mp3")
-            req.addOption("--audio-quality", "0")
-            req.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
-            req.addOption("-f", "bestaudio/best")
-
-            YoutubeDL.getInstance().execute(req)
+            withTimeout(120_000) {
+                val req = YoutubeDLRequest(url)
+                req.addOption("--no-playlist")
+                req.addOption("--no-warnings")
+                req.addOption("--no-check-certificate")
+                req.addOption("--socket-timeout", "15")
+                req.addOption("--user-agent", "Mozilla/5.0")
+                req.addOption("--extract-audio")
+                req.addOption("--audio-format", "mp3")
+                req.addOption("--audio-quality", "0")
+                req.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
+                req.addOption("-f", "bestaudio/best")
+                YoutubeDL.getInstance().execute(req)
+            }
 
             val mp3 = dir.listFiles()?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
-            if (mp3 == null || !mp3.exists() || mp3.length() == 0L) return@withContext "no se generó MP3"
+            if (mp3 == null || !mp3.exists() || mp3.length() == 0L) return "no se generó MP3"
 
             saveToDownloads(mp3, "mp3")
-            return@withContext null
-        } catch (e: Exception) {
-            return@withContext e.message ?: "error yt-dlp"
-        }
+            return null
+        } catch (e: Exception) { return e.message ?: "error" }
     }
 
     private fun saveToDownloads(file: File, ext: String) {
