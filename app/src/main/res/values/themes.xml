@@ -9,6 +9,7 @@
         <item name="colorOnSecondary">@color/white</item>
         <item name="colorSurface">@color/surface</item>
         <item name="colorOnSurface">#FF1D192B</item>
+        <item name="colorOutline">#FFCAC4D0</item>
         <item name="android:windowBackground">@color/background</item>
     </style>
 </resources>

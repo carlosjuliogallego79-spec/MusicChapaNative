@@ -12,7 +12,7 @@
         android:text="@string/url_download"
         android:textAppearance="?attr/textAppearanceHeadlineSmall"
         android:textColor="?attr/colorOnSurface"
-        android:layout_marginBottom="12dp" />
+        android:layout_marginBottom="20dp" />
 
     <EditText
         android:id="@+id/url_input"
@@ -20,31 +20,39 @@
         android:layout_height="wrap_content"
         android:hint="@string/url_hint"
         android:inputType="textUri"
-        android:padding="12dp"
+        android:padding="14dp"
         android:background="@drawable/rounded_input"
         android:textColor="?attr/colorOnSurface"
-        android:textColorHint="?attr/colorOnSurfaceVariant" />
+        android:textColorHint="?attr/colorOnSurfaceVariant"
+        android:fontFamily="sans-serif"
+        android:letterSpacing="0.01" />
 
     <Button
         android:id="@+id/download_btn"
         android:layout_width="match_parent"
-        android:layout_height="48dp"
+        android:layout_height="52dp"
         android:layout_marginTop="16dp"
         android:text="@string/download"
-        style="?attr/materialButtonStyle" />
-
-    <Spinner
-        android:id="@+id/format_spinner"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:visibility="gone" />
+        android:textAllCaps="false"
+        android:textSize="16sp"
+        android:backgroundTint="?attr/colorPrimary" />
 
     <TextView
         android:id="@+id/status_text"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
         android:textColor="?attr/colorOnSurfaceVariant" />
+
+    <ProgressBar
+        android:id="@+id/progress_bar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="6dp"
+        android:layout_marginTop="12dp"
+        android:visibility="gone"
+        android:progressTint="?attr/colorPrimary"
+        android:progressBackgroundTint="@color/progress_track" />
 
 </LinearLayout>

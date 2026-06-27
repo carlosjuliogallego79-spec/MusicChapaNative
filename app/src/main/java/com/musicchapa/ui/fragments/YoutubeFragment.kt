@@ -8,6 +8,7 @@ import android.provider.MediaStore
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ProgressBar
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -32,9 +33,11 @@ class YoutubeFragment : Fragment() {
         val view = inflater.inflate(R.layout.fragment_youtube, container, false)
         val searchInput = view.findViewById<android.widget.EditText>(R.id.search_input)
         val recycler = view.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.results_list)
+        val progressBar = view.findViewById<ProgressBar>(R.id.progress_bar)
+
         recycler.layoutManager = LinearLayoutManager(requireContext())
         val adapter = YoutubeResultAdapter(results) { videoId ->
-            scope.launch { downloadAudio(videoId) }
+            scope.launch { downloadAudio(videoId, progressBar) }
         }
         recycler.adapter = adapter
 
@@ -94,15 +97,19 @@ class YoutubeFragment : Fragment() {
         }
     }
 
-    private fun downloadAudio(videoId: String) {
+    private fun downloadAudio(videoId: String, progressBar: ProgressBar) {
         scope.launch {
             val ctx = requireContext()
 
             var attempts = 0
             while (!ytdlpReady && attempts < 20) { delay(1000); attempts++ }
-            if (!ytdlpReady) { Toast.makeText(ctx, "Error: yt-dlp no disponible", Toast.LENGTH_SHORT).show(); return@launch }
+            if (!ytdlpReady) {
+                Toast.makeText(ctx, "Error: yt-dlp no disponible", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
 
             val url = "https://www.youtube.com/watch?v=$videoId"
+            progressBar.visibility = View.VISIBLE
             Toast.makeText(ctx, "Descargando...", Toast.LENGTH_SHORT).show()
 
             val result = withContext(Dispatchers.IO) {
@@ -110,6 +117,7 @@ class YoutubeFragment : Fragment() {
                     val dir = File(ctx.cacheDir, "ytdlp")
                     dir.mkdirs()
 
+                    val timestamp = System.currentTimeMillis()
                     withTimeout(180_000) {
                         val req = YoutubeDLRequest(url)
                         req.addOption("--no-playlist")
@@ -119,26 +127,27 @@ class YoutubeFragment : Fragment() {
                         req.addOption("--extract-audio")
                         req.addOption("--audio-format", "mp3")
                         req.addOption("--audio-quality", "0")
-                        req.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
+                        req.addOption("-o", "${dir.absolutePath}/$timestamp.%(ext)s")
                         req.addOption("-f", "bestaudio/best")
                         YoutubeDL.getInstance().execute(req)
                     }
 
-                    val mp3 = dir.listFiles()?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
-                    if (mp3 == null || !mp3.exists() || mp3.length() == 0L) return@withContext "no se generó MP3"
+                    val mp3 = File(dir, "$timestamp.mp3")
+                    if (!mp3.exists() || mp3.length() == 0L) return@withContext "no se generó MP3"
 
                     saveFile(ctx, mp3)
                     null
                 } catch (e: Exception) { e.message ?: "error" }
             }
 
+            progressBar.visibility = View.GONE
             if (result == null) Toast.makeText(ctx, "Completa ✓", Toast.LENGTH_SHORT).show()
             else Toast.makeText(ctx, "Error: $result", Toast.LENGTH_LONG).show()
         }
     }
 
     private fun saveFile(ctx: android.content.Context, file: File) {
-        val fileName = "audio_${System.currentTimeMillis()}.mp3"
+        val fileName = "${file.nameWithoutExtension}_${System.currentTimeMillis()}.mp3"
         if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)

@@ -8,6 +8,7 @@ import android.provider.MediaStore
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ProgressBar
 import androidx.fragment.app.Fragment
 import com.musicchapa.R
 import com.yausername.youtubedl_android.YoutubeDL
@@ -25,6 +26,7 @@ class UrlDownloadFragment : Fragment() {
         val view = inflater.inflate(R.layout.fragment_url_download, container, false)
         val urlInput = view.findViewById<android.widget.EditText>(R.id.url_input)
         val statusText = view.findViewById<android.widget.TextView>(R.id.status_text)
+        val progressBar = view.findViewById<ProgressBar>(R.id.progress_bar)
 
         warmupYtdlp()
 
@@ -32,8 +34,9 @@ class UrlDownloadFragment : Fragment() {
             val url = urlInput.text.toString().trim()
             if (url.isEmpty()) return@setOnClickListener
             urlInput.text.clear()
+            progressBar.visibility = View.VISIBLE
             statusText.text = "Descargando..."
-            scope.launch { downloadAudio(url, statusText) }
+            scope.launch { downloadAudio(url, statusText, progressBar) }
         }
         return view
     }
@@ -48,19 +51,23 @@ class UrlDownloadFragment : Fragment() {
         }
     }
 
-    private suspend fun downloadAudio(url: String, statusText: android.widget.TextView) {
+    private suspend fun downloadAudio(url: String, statusText: android.widget.TextView, progressBar: ProgressBar) {
         val ctx = requireContext()
 
         var attempts = 0
         while (!ytdlpReady && attempts < 20) { delay(1000); attempts++ }
-        if (!ytdlpReady) { statusText.text = "Error: yt-dlp no disponible"; return }
+        if (!ytdlpReady) {
+            progressBar.visibility = View.GONE
+            statusText.text = "Error: yt-dlp no disponible"
+            return
+        }
 
-        statusText.text = "Descargando con yt-dlp..."
         val result = withContext(Dispatchers.IO) {
             try {
                 val dir = File(ctx.cacheDir, "ytdlp")
                 dir.mkdirs()
 
+                val timestamp = System.currentTimeMillis()
                 withTimeout(180_000) {
                     val req = YoutubeDLRequest(url)
                     req.addOption("--no-playlist")
@@ -70,24 +77,26 @@ class UrlDownloadFragment : Fragment() {
                     req.addOption("--extract-audio")
                     req.addOption("--audio-format", "mp3")
                     req.addOption("--audio-quality", "0")
-                    req.addOption("-o", "${dir.absolutePath}/%(title)s.%(ext)s")
+                    req.addOption("-o", "${dir.absolutePath}/$timestamp.%(ext)s")
                     req.addOption("-f", "bestaudio/best")
                     YoutubeDL.getInstance().execute(req)
                 }
 
-                val mp3 = dir.listFiles()?.filter { it.extension == "mp3" }?.maxByOrNull { it.lastModified() }
-                if (mp3 == null || !mp3.exists() || mp3.length() == 0L) return@withContext "no se generó MP3"
+                val mp3 = File(dir, "$timestamp.mp3")
+                if (!mp3.exists() || mp3.length() == 0L) return@withContext "no se generó MP3"
 
                 saveToDownloads(mp3)
                 null
             } catch (e: Exception) { e.message ?: "error" }
         }
+        progressBar.visibility = View.GONE
         statusText.text = if (result == null) "Completa ✓" else "Error: $result"
     }
 
     private fun saveToDownloads(file: File) {
         val ctx = requireContext()
-        val fileName = "audio_${System.currentTimeMillis()}.mp3"
+        val songTitle = file.nameWithoutExtension
+        val fileName = "${songTitle}_${System.currentTimeMillis()}.mp3"
         if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)

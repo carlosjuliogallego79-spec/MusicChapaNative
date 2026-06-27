@@ -20,6 +20,7 @@ class SongAdapter(
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val title: TextView = view.findViewById(R.id.song_title)
         val detail: TextView = view.findViewById(R.id.song_detail)
+        val playBtn: ImageButton = view.findViewById(R.id.play_btn)
         val deleteBtn: ImageButton = view.findViewById(R.id.delete_btn)
     }
 
@@ -32,7 +33,7 @@ class SongAdapter(
         val item = songs[position]
         holder.title.text = item.title
         holder.detail.text = formatSize(item.size)
-        holder.itemView.setOnClickListener { onPlay(item) }
+        holder.playBtn.setOnClickListener { onPlay(item) }
         holder.deleteBtn.setOnClickListener { onDelete(item) }
     }
 

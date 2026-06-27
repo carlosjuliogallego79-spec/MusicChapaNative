@@ -1,13 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="purple_primary">#FF6750A4</color>
-    <color name="purple_dark">#FF381E72</color>
-    <color name="purple_light">#FFEADDFF</color>
+    <color name="purple_primary">#FF7C4DFF</color>
+    <color name="purple_dark">#FF3D1D9E</color>
+    <color name="purple_light">#FFE8DEFF</color>
     <color name="white">#FFFFFFFF</color>
     <color name="black">#FF000000</color>
     <color name="gray">#FF9E9E9E</color>
+    <color name="gray_light">#FFE0E0E0</color>
     <color name="background">#FFFDF8FF</color>
     <color name="background_dark">#FF121016</color>
     <color name="surface">#FFFFFBFE</color>
     <color name="surface_dark">#FF1C1B1F</color>
+    <color name="card_light">#FFFFFFFF</color>
+    <color name="card_dark">#FF2D2B30</color>
+    <color name="progress_track">#FFE8DEFF</color>
+    <color name="progress_track_dark">#FF3D3A43</color>
 </resources>
