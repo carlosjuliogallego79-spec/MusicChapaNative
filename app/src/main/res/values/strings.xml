@@ -2,9 +2,11 @@
     <string name="app_name">MusicChapa</string>
     <string name="library">Biblioteca</string>
     <string name="youtube">YouTube</string>
+    <string name="soundcloud">SoundCloud</string>
     <string name="url_download">URL</string>
     <string name="settings">Ajustes</string>
     <string name="search_hint">Buscar canción o artista...</string>
+    <string name="sc_search_hint">Buscar en SoundCloud...</string>
     <string name="url_hint">Link de YouTube o MP3 directo</string>
     <string name="download">Descargar</string>
     <string name="no_songs">No hay canciones descargadas todavía</string>

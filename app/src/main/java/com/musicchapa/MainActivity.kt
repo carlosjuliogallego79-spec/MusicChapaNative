@@ -20,6 +20,7 @@ class MainActivity : AppCompatActivity() {
             when (item.itemId) {
                 R.id.nav_library -> switchFragment(LibraryFragment())
                 R.id.nav_youtube -> switchFragment(YoutubeFragment())
+                R.id.nav_soundcloud -> switchFragment(SoundcloudFragment())
                 R.id.nav_url -> switchFragment(UrlDownloadFragment())
                 R.id.nav_settings -> switchFragment(SettingsFragment())
             }
