@@ -118,11 +118,10 @@ class YoutubeFragment : Fragment() {
 
             val formatOptions = listOf(
                 "bestaudio[ext=m4a]/bestaudio",
-                "bestaudio/best",
-                "140/251/250/249"
+                "bestaudio/best"
             )
 
-            for (fmt in formatOptions) {
+            for ((idx, fmt) in formatOptions.withIndex()) {
                 progressBar.visibility = View.VISIBLE
                 progressBar.isIndeterminate = true
 
@@ -130,7 +129,7 @@ class YoutubeFragment : Fragment() {
 
                 scope.launch(Dispatchers.IO) {
                     try {
-                        withTimeout(120_000) {
+                        withTimeout(60_000) {
                             val req = YoutubeDLRequest(url)
                             req.addOption("--no-playlist")
                             req.addOption("--no-warnings")

@@ -71,12 +71,11 @@ class UrlDownloadFragment : Fragment() {
 
         val formatOptions = listOf(
             "bestaudio[ext=m4a]/bestaudio",
-            "bestaudio/best",
-            "140/251/250/249"
+            "bestaudio/best"
         )
 
-        for (fmt in formatOptions) {
-            statusText.text = "Iniciando..."
+        for ((idx, fmt) in formatOptions.withIndex()) {
+            statusText.text = "Descargando (intento ${idx + 1})..."
             progressBar.isIndeterminate = true
             pollingJob = null
 
@@ -84,7 +83,7 @@ class UrlDownloadFragment : Fragment() {
 
             val job = scope.launch(Dispatchers.IO) {
                 try {
-                    withTimeout(120_000) {
+                    withTimeout(60_000) {
                         val req = YoutubeDLRequest(url)
                         req.addOption("--no-playlist")
                         req.addOption("--no-warnings")
@@ -148,10 +147,10 @@ class UrlDownloadFragment : Fragment() {
                 progressBar.visibility = View.GONE
                 return
             }
-            statusText.text = "Formato $fmt: $result"
+            statusText.text = "Error: $result"
         }
         progressBar.visibility = View.GONE
-        statusText.text = "Error: no se pudo descargar"
+        statusText.text = "No se pudo descargar"
     }
 
     private fun formatSize(bytes: Long): String {

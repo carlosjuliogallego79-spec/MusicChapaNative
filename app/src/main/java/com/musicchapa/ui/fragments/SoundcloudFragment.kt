@@ -114,12 +114,12 @@ class SoundcloudFragment : Fragment() {
             progressBar.visibility = View.VISIBLE
             progressBar.isIndeterminate = true
 
-            for (fmt in listOf("bestaudio[ext=m4a]/bestaudio", "bestaudio/best", "http-mp3-128/0")) {
+            for ((idx, fmt) in listOf("bestaudio[ext=m4a]/bestaudio", "bestaudio/best").withIndex()) {
                 val downloadJob = CompletableDeferred<String?>()
 
                 scope.launch(Dispatchers.IO) {
                     try {
-                        withTimeout(120_000) {
+                        withTimeout(60_000) {
                             val req = YoutubeDLRequest(url)
                             req.addOption("--no-playlist")
                             req.addOption("--no-warnings")
